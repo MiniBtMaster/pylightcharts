@@ -1,0 +1,24 @@
+{
+  "name": "pylightcharts-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript bridge + drawing plugins bundled for the pylightcharts Python package.",
+  "scripts": {
+    "build": "rollup -c && node scripts/postbuild.mjs",
+    "watch": "rollup -c -w",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "lightweight-charts": "5.2.1"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.1",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-typescript": "^12.1.2",
+    "rollup": "^4.40.0",
+    "tslib": "^2.8.1",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
