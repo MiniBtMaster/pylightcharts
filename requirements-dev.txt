@@ -1,0 +1,25 @@
+# Everything needed to develop, test, document and release pylightcharts.
+#
+#   pip install -r requirements-dev.txt
+#
+# The same sets are available as extras: pip install -e ".[test,e2e,docs]"
+
+-r requirements.txt
+
+# --- unit tests ---------------------------------------------------------
+pytest>=7
+pillow>=9
+
+# --- browser e2e + headless rendering ----------------------------------
+# after installing: playwright install chromium
+playwright>=1.40
+
+# --- packaging ---------------------------------------------------------
+build>=1.0
+
+# --- documentation -----------------------------------------------------
+mkdocs-material>=9
+
+# --- optional GUI backends (uncomment what you use) --------------------
+# PySide6
+# ipython
