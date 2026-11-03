@@ -1,0 +1,175 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # ------------------------------------------------------------------
+  # Build the JS bridge + engine bundle from source, and make sure the
+  # committed artifacts match (so `pip install` works without node).
+  # ------------------------------------------------------------------
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install JS dependencies
+        working-directory: jslib
+        run: npm ci
+      - name: Build bundle
+        working-directory: jslib
+        run: npm run build
+      - name: JS unit tests
+        working-directory: jslib
+        run: npm test
+      - name: Fail if the committed bundle is stale
+        run: |
+          if ! git diff --exit-code -- pylightcharts/js; then
+            echo "::error::pylightcharts/js is out of date - run 'npm run build' in jslib/ and commit the result"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: js-assets
+          path: pylightcharts/js
+
+  # ------------------------------------------------------------------
+  # Unit tests on every OS / supported python.
+  # ------------------------------------------------------------------
+  test:
+    needs: js
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-assets
+          path: pylightcharts/js
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+      - name: Unit tests
+        run: pytest -q -m "not slow"
+
+  # ------------------------------------------------------------------
+  # Browser end-to-end: real rendering in headless Chromium.
+  # ------------------------------------------------------------------
+  e2e:
+    needs: js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-assets
+          path: pylightcharts/js
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[e2e]"
+          playwright install --with-deps chromium
+      - name: Headless render tests
+        run: pytest tests/test_headless.py -q
+      - name: Browser smoke test
+        run: python tests/e2e/smoke.py
+
+  # ------------------------------------------------------------------
+  # Docs: API reference must be regenerated and the site must build.
+  # ------------------------------------------------------------------
+  docs:
+    needs: js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-assets
+          path: pylightcharts/js
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+      - name: API reference is up to date
+        run: |
+          python scripts/gen_api_docs.py
+          if ! git diff --exit-code -- docs/api.md; then
+            echo "::error::docs/api.md is stale - run 'python scripts/gen_api_docs.py'"
+            exit 1
+          fi
+      - name: Build the site
+        run: mkdocs build --strict
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: site
+
+  # ------------------------------------------------------------------
+  # Build a wheel and verify the JS assets ship inside it.
+  # ------------------------------------------------------------------
+  package:
+    needs: js
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: js-assets
+          path: pylightcharts/js
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build pytest
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Verify the sdist is a self-testable source tree
+        run: python scripts/check_sdist.py
+      - name: Verify the wheel contains the JS assets and the subpackages
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          wheel = glob.glob('dist/*.whl')[0]
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = ['bundle.js', 'lightweight-charts.js', 'index.html', 'styles.css']
+          missing = [n for n in required if f'pylightcharts/js/{n}' not in names]
+          # `pylightcharts.panels` is a subpackage: a wheel built with a bare
+          # `packages = ["pylightcharts"]` silently drops it.
+          subpackages = ['panels/__init__.py', 'panels/data_grid.py',
+                         'panels/sparkline.py']
+          missing += [n for n in subpackages if f'pylightcharts/{n}' not in names]
+          if missing:
+              print(f'::error::missing from wheel: {missing}')
+              sys.exit(1)
+          print(f'{wheel}: all JS assets + subpackages present')
+          PY
+      - name: Install the wheel in a clean environment and import it
+        run: |
+          python -m venv /tmp/verify
+          /tmp/verify/bin/python -m pip install --upgrade pip
+          /tmp/verify/bin/pip install dist/*.whl
+          /tmp/verify/bin/python -c "import pylightcharts, os; from pylightcharts.headless import HeadlessChart; print('imported', pylightcharts.__file__)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
