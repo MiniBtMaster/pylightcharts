@@ -420,6 +420,16 @@ export class SettingsPage {
                 (value) => this.options.onSetting('app_theme', value)));
         this._row('palette', '主题色', '调整你的应用的主题色（支持自定义颜色）',
             this._accentControl(String(v.theme_accent || '')));
+        // ★ 界面缩放是**整个桌面端**的设置（不是编辑器专属）→ 2026-11-05
+        //   用户要求从「编辑器」搬到「外观」，默认 **100%** ✓
+        this._row('zoom', '界面缩放', '调整整个 minibt desk 的小部件和字体大小',
+            this._select(
+                ZOOMS.map((item) => ({ value: String(item.value),
+                    label: item.label })),
+                String(v.ui_zoom === undefined || v.ui_zoom === null
+                    ? 1 : Number(v.ui_zoom)),
+                (value) => this.options.onSetting('ui_zoom',
+                    Number(value) || 0)));
         // ★ 运行日志输出位置（P92）：终端 / 程序内 ✓
         this._section('运行日志');
         this._row('log_terminal', '终端输出',
@@ -474,13 +484,6 @@ export class SettingsPage {
             this._pathInput(String(v.editor_minibt_path || ''),
                 !!v.editor_minibt_path_enabled,
                 (value) => this.options.onSetting('editor_minibt_path', value)));
-        this._row('zoom', '界面缩放', '调整小部件和字体的大小',
-            this._select(
-                ZOOMS.map((item) => ({ value: String(item.value),
-                    label: item.label })),
-                String(Number(v.ui_zoom || 0)),
-                (value) => this.options.onSetting('ui_zoom',
-                    Number(value) || 0)));
     }
 
     // ------------------------------------------------------------ 关于
@@ -549,8 +552,9 @@ export class SettingsPage {
             '在图表上显示持仓成本线（多仓绿 / 空仓红，含天勤模拟与本地模拟）',
             this._switch(v.position_line !== false, (checked) =>
                 this.options.onSetting('position_line', checked)));
-        this._row('order_line', '挂单线',
-            '在图表上显示未成交的挂单价（天勤模拟 / 本地模拟的挂单都会显示）',
+        this._row('order_line', '挂单线 / 平仓线',
+            '在图表上显示未成交委托的价格（开仓=挂单线，平仓=平仓线；'
+            + '天勤模拟 / 本地模拟都显示）',
             this._switch(v.order_line !== false, (checked) =>
                 this.options.onSetting('order_line', checked)));
         this._section('指标刷新');

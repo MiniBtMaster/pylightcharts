@@ -105,12 +105,16 @@ def test_is_signal_line_needs_hint_and_discrete_values():
 
 # ------------------------------------------------------- 买卖盘（点差盘）
 def test_ticket_has_buy_spread_sell_layout():
-    page = _read(DESK_TS / 'chart-page.ts')
-    # P34 起买卖盘只有三个格子（透明、无手数/价格/档位 ✓）
+    # 2026-11-03：买卖盘挪到 `ticket-bar.ts`（**每格一条** + 行尾 👁 ✓）
+    bar = _read(DESK_TS / 'ticket-bar.ts')
     for key in ('desk-ticket-row', 'desk-ticket-side', 'desk-ticket-spread',
-                '买入', '卖出', '平仓', '_ticketClick',
-                "'ticket_order'", 'setTicketBook', 'setDecimals'):
-        assert key in page, key
+                '买入', '卖出', '平仓', 'desk-ticket-price'):
+        assert key in bar, key
+    # 两个图表页只负责路由 / 落盘 / 下单命令 ✓
+    for name in ('chart-page.ts', 'local-chart-page.ts'):
+        page = _read(DESK_TS / name)
+        assert 'setTicketBook' in page and 'setDecimals' in page
+        assert "'ticket_order'" in page
     css = _read(DESK_TS / 'desk.css')
     for key in ('.desk-ticket-side.buy', '.desk-ticket-side.sell',
                 '.desk-ticket-side.flat', '.desk-ticket-spread'):
@@ -118,12 +122,12 @@ def test_ticket_has_buy_spread_sell_layout():
 
 
 def test_ticket_labels_follow_position():
-    page = _read(DESK_TS / 'chart-page.ts')
     # 多仓 → 右侧平仓；空仓 → 左侧平仓（和 minibt 实时图一致 ✓）
-    assert 'const leftClose = net < 0' in page
-    assert 'const rightClose = net > 0' in page
+    bar = _read(DESK_TS / 'ticket-bar.ts')
+    assert 'const leftClose = this.net < 0' in bar
+    assert 'const rightClose = this.net > 0' in bar
     # 点差 = |卖一 − 买一|
-    assert 'Math.abs(this.ticketAsk - this.ticketBid)' in page
+    assert 'Math.abs(this.ask - this.bid)' in bar
 
 
 def test_marker_kind_supported_in_layer():

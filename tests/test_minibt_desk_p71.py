@@ -23,8 +23,9 @@ def test_local_chart_reads_shared_ticket_values():
     local = _ts('local-chart-page.ts')
     block = local.split('private _localOrder(', 1)[1].split('\n    }', 1)[0]
     assert 'this.localTicket?.priceValue()' in block
-    assert 'this.localTicket?.qtyValue()' in block
-    assert '|| 1;' in block
+    # ★ 手数由**按钮**决定（平多X 已夹到持仓以内），不再读输入框 ✓
+    assert 'volume: order.volume,' in block
+    assert 'offset: order.offset,' in block
     # 手数输入框接上了（以前是 null → 永远读到 0 ✗）
     assert "const inputs = ticket.element.querySelectorAll('input[type=number]');" in local
     assert 'this.localQtyInput = (inputs[1] || null)' in local

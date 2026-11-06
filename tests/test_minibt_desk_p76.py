@@ -98,10 +98,11 @@ def test_login_info_returns_saved(tmp_path, monkeypatch):
 
 def test_connect_futures_requires_credentials(tmp_path, monkeypatch):
     desk = _desk(tmp_path, monkeypatch)
+    # ★ 2026-11-05：缺字段逐项提示（用户名 / 登录密码 / 实盘三项）
     desk._on_connect_futures({'username': '', 'password': ''})
     patch = _patches(desk, 'login')[-1]
     assert patch['state'] == 'error' and patch['ok'] is False
-    assert '账号和密码' in patch['text']
+    assert '用户名' in patch['text']
     # 实盘缺少券商信息 → 也拦住 ✓
     desk.sent.clear()
     desk._on_connect_futures({'username': 'u', 'password': 'p', 'real': True})

@@ -1,0 +1,155 @@
+# ============================================================================
+# pylightcharts —— GitHub 仓库忽略规则
+#
+# 仓库根 = 本项目（README / pyproject / jslib / pylightcharts / tests / …）
+# 兄弟工程（minibt / miniqt / tutorials / minibt_docs / futu / qtvscode / …）
+# 都是本地副本，**不随本仓库上传** ✓
+#
+# ⚠ `.gitignore` 里**行尾不能写注释**：`*.c  # xxx` 会被当成完整通配符，
+#   从而**永远匹配不上**（实测踩过 ✗）。注释一律单独占一行。
+# ⚠ 只对**未跟踪**文件生效；已提交的路径要先 `git rm -r --cached <路径>`。
+# ============================================================================
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheelhouse/
+pip-wheel-metadata/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# ------------------------------------------------- 编译产物（Cython / C 扩展）
+*.c
+*.pyd
+*.so
+*.dylib
+*.dll
+*.lib
+*.obj
+*.exp
+*.tsbuildinfo
+
+# ------------------------------------------------------ Node / JS 构建
+node_modules/
+jslib/dist/
+jslib/typings/
+*.tgz
+
+# ⚠ `pylightcharts/js/*` 是**随 wheel 发布**的前端资源，必须提交！
+#   （想改成"发布时才构建"就把下面两行取消注释）
+# pylightcharts/js/bundle.js
+# pylightcharts/js/lightweight-charts.js
+
+# ---------------------------------------------------------------- 文档产物
+site/
+docs/_build/
+
+# ------------------------------------------------- 第三方 / 参考源码副本
+reference/
+lightweight-charts/
+lightweight-charts-python/
+lwc-python/
+PyQt-Fluent-Widgets-master/
+
+# ------------------------------------------------- 兄弟工程（不属于本仓库）
+minibt/
+miniqt/
+minibt_docs/
+tutorials/
+futu/
+qtvscode/
+vscode-minibt/
+/tradingview/
+/design/
+/app/
+
+# ------------------------------------------------------------ 运行时产物
+*.log
+/test/
+/results/
+_diag_*.py
+_tmp_*
+_bundle_current/
+
+# ------------------------------------------------------- 示例演示媒体
+# 只保留 examples/13_panels（它的 README / 脚本引用这些截图）
+examples/**/*.gif
+examples/**/*.png
+examples/**/*.jpg
+examples/**/*.html
+!examples/13_panels/*.png
+
+# ------------------------------------------------- 本地策略 / 个人脚本（含真
+# 实天勤账号，绝不能提交）。官方示例在 examples/、测试在 tests/。
+cci.py
+cci.html
+cci.ipynb
+example_realtime.py
+example_tq_live.py
+strategy_replay.py
+probe_chart.py
+bench_minibt.py
+bench_minibt.html
+test.py
+BtPlot.ipynb
+01_backtest_bokeh.ipynb
+examples/8_headless/chart.html
+examples/8_headless/chart.png
+
+# 根目录只放仓库级文件（README / pyproject / requirements / mkdocs.yml …）；
+# 其它根目录下的脚本 / 笔记本 / 截图 / 临时文件一律不入库 ✓
+/*.py
+/*.ipynb
+/*.png
+/*.jpg
+/*.html
+/*.txt
+!/requirements*.txt
+/_*.ps1
+/_*.mjs
+/_*.js
+API_*.md
+
+# 敏感：账号 / 密钥 / 权益文件
+.env
+.env.*
+*.pem
+*.key
+*_secret*
+account_info*
+trade_datas*
+
+# ------------------------------------------------- 个人配置 / 拖进仓库的状态
+desk_personal.json
+tv_groups.json
+tv_state.json
+
+# ------------------------------------------------------ 编辑器 / 系统 / 备份
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+*.tmp

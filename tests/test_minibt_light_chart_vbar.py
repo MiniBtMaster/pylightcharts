@@ -45,13 +45,29 @@ class FakeChart:
 # ------------------------------------------------------------------ 样式解析
 def test_vbar_style_reads_colors_and_base():
     up, down, base = lc._vbar_style({
-        'vbar_up_color': 'rgba(200, 97, 100, 100)',   # minibt 调色板 0~255
+        'vbar_up_color': 'rgba(10, 20, 30, 100)',     # 自定义色，alpha 0~255
         'vbar_down_color': '#26a69a',
         'vbar_base': 50,
     })
-    assert up == 'rgba(200, 97, 100, 0.392)'          # alpha 归一化到 0~1 ✓
+    assert up == 'rgba(10, 20, 30, 0.392)'            # alpha 归一化到 0~1 ✓
     assert down == '#26a69a'
     assert base == 50.0
+
+
+def test_vbar_style_drops_palette_defaults():
+    """调色板**默认**涨跌色（`Colors.bull_color` / `bear_color`）＝没设置 ✓
+
+    用户 2026-11-03：柱体又暗又偏，跟成交量一个色 ✗ —— 正是因为库里默认
+    就拿这两个半透明色当柱体色。丢掉之后 `_hist_color_column()` 会回退到
+    K 线涨跌色（`vbar_base` 以上上涨色、以下下跌色）✓。
+    """
+    up, down, base = lc._vbar_style({
+        'vbar_up_color': 'rgba(39, 157, 130, 100)',   # Colors.bull_color
+        'vbar_down_color': 'rgba(200, 97, 100, 100)',  # Colors.bear_color
+        'vbar_base': 0,
+    })
+    assert up is None and down is None
+    assert base == 0.0
 
 
 def test_vbar_style_prefers_color_base_and_defaults_to_zero():
@@ -76,13 +92,28 @@ def test_hist_color_column_honours_vbar_base():
     assert colors.tolist() == ['green', 'red']        # 40 < 50 < 60 ✓
 
 
-def test_hist_color_column_falls_back_to_macdh_rule():
+def test_hist_color_column_defaults_to_kline_colors():
+    """没配颜色 → 任何柱体线都按 K 线涨跌色分色（不只 macdh ✓）
+
+    用户 2026-11-03：所有默认柱体（`LineStyle(line_dash=LineDash.vbar)`）
+    都要求 `vbar_base` 以上涨色、以下跌色，除非自己配了颜色。
+    """
     colors = lc._hist_color_column([1.0, -1.0], {}, 'macdh',
                                    default_up='#f00', default_down='#0f0')
     assert colors.tolist() == ['#f00', '#0f0']
-    # 非 macdh 且没设颜色 → 不做逐点配色（保持单色 ✓）
+    # 非 macdh 的柱体同样分色 ✓（以前保持单色 = 指标线色 ✗）
+    colors = lc._hist_color_column([1.0, -1.0], {}, 'rsi',
+                                   default_up='#f00', default_down='#0f0')
+    assert colors.tolist() == ['#f00', '#0f0']
+    # 调色板默认色（半透明）也被当作"没设置"→ 还是 K 线色 ✓
+    colors = lc._hist_color_column(
+        [2.0, -2.0],
+        {'vbar_up_color': 'rgba(39, 157, 130, 100)',
+         'vbar_down_color': 'rgba(200, 97, 100, 100)'},
+        'ao', default_up='#f00', default_down='#0f0')
+    assert colors.tolist() == ['#f00', '#0f0']
+    # 没有默认色可用 / 只有一边颜色 → 不做逐点配色（避免一半 null ✗）
     assert lc._hist_color_column([1.0, -1.0], {}, 'rsi') is None
-    # 只有一边颜色 → 也不逐点配色（避免一半 null 被引擎拒绝 ✗）
     assert lc._hist_color_column([1.0], {'vbar_up_color': 'red'}, 'x') is None
 
 

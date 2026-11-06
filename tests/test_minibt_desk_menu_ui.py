@@ -85,6 +85,11 @@ def test_trading_close_reverse_cancel_use_symbol_api():
         def __init__(self):
             self.task = Task()
             self.cancelled = []
+            self.orders = []
+
+        def insert_order(self, **kwargs):
+            # ★ 2026-11-05：平 / 反 改成**限价单（对手价）**，不再走 TargetPosTask
+            self.orders.append(kwargs)
 
         def get_position(self, symbol, **kwargs):
             return Pos()
@@ -115,10 +120,16 @@ def test_trading_close_reverse_cancel_use_symbol_api():
     desk.trading = True
     desk.filter = {'type': 'STOCK', 'exchange': '', 'text': ''}
     trader = Trading(desk)
-    assert '目标仓位' in trader.action('close', 'SHFE.rb2610')
-    assert feed.api.task.target == 0
-    assert '目标仓位' in trader.action('reverse', 'SHFE.rb2610')
-    assert feed.api.task.target == -2
+    # 平仓：卖出平 2 手（多头 2 手）✓
+    assert '卖平' in trader.action('close', 'SHFE.rb2610')
+    close_call = feed.api.orders[-1]
+    assert (close_call['direction'], close_call['offset']) == ('SELL', 'CLOSE')
+    assert close_call['volume'] == 2
+    # 反手：平 2 手 + 反向开 2 手（两笔限价）✓
+    trader.action('reverse', 'SHFE.rb2610')
+    close_leg, open_leg = feed.api.orders[-2], feed.api.orders[-1]
+    assert (close_leg['offset'], open_leg['offset']) == ('CLOSE', 'OPEN')
+    assert (close_leg['direction'], open_leg['direction']) == ('SELL', 'BUY')
     assert '已撤 1 笔' in trader.action('cancel', 'SHFE.rb2610')
     assert feed.api.cancelled == ['o1']
 
@@ -206,7 +217,9 @@ def test_local_link_aligns_by_index_not_time():
     page = _read(JSLIB / 'local-chart-page.ts')
     link = page.split('private _bindLink()', 1)[1].split(
         'togglePositionLine', 1)[0]
-    assert 'setVisibleLogicalRange(range)' in link
+    # 2026-11-03：回声保护 → 推的是规范化后的 `{from, to}` ✓
+    assert 'other.timeScale().setVisibleLogicalRange(' in link
+    assert 'this._linkApplying' in link
     assert 'param.logical' in link
     assert 'Math.round(logical)' in link
     assert 'subscribeVisibleTimeRangeChange' not in link
@@ -256,7 +269,8 @@ def test_local_sprite_lists_local_data_first():
     desk.handle('desk_~_' + json.dumps(
         {'cmd': 'sprite_search',
          'payload': {'text': '', 'limit': 5, 'local': True}}))
-    text = patches[-1]
+    # ⚠ 慢命令会在最后补一条 `[性能] 命令 … 耗时` 日志 → 取**搜索结果**那条 ✓
+    text = [row for row in patches if '"type":"log"' not in row][-1]
     first = text.index('l2609_60')
     assert first < text.index('KDJ')
 

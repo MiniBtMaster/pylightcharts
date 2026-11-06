@@ -54,12 +54,30 @@ def test_futures_and_stocks_route_to_their_own_api(tmp_path, monkeypatch):
     desk.tabs['SHFE.ag2612'] = {'feed': desk.futures, 'cycle': 60}
 
     trader = desk.trading_view()
+    # ★ 2026-11-05 统一账户：按**当前账户 kind** 路由，且品种必须匹配
+    #   快期模拟 / TqAccount → 期货；富途模拟 → 股票 ✓
     trader.place('SHFE.ag2612', 'buy', 1, 7000)
+    assert fut.calls == ['SHFE.ag2612']            # 期货 → 天勤 ✓
+    # ★ 账户**按页独立**（2026-11-05）：
+    #   · 股票页默认就是「富途模拟」→ 下股票单正常走股票接口 ✓
+    #   · 页面被设成快期模拟 / 实盘 → 下股票单**直接被拦**（不发任何 api）✓
+    desk._account_keys['chart:SSE.600000'] = 'kq'
+    text = trader.place('SSE.600000', 'buy', 100, 10.0)
+    assert '请切换账户' in text and stk.calls == []
+    desk._account_keys.pop('chart:SSE.600000', None)
+    # 切到富途模拟 → 股票走本地模拟；**期货按品种收敛到 kq**（不会被拦 ✓）
+    assert desk.set_account_kind('futu')
     trader.place('SSE.600000', 'buy', 100, 10.0)
     trader.place('HK.00700', 'buy', 100, 300.0)
-
-    assert fut.calls == ['SHFE.ag2612']            # 期货 → 天勤 ✓
     assert stk.calls == ['SSE.600000', 'HK.00700']  # 股票 → 本地模拟 ✓
+    trader.place('SHFE.ag2612', 'buy', 1, 7000)
+    assert fut.calls == ['SHFE.ag2612', 'SHFE.ag2612']   # ★ 期货走天勤 ✓
+    # 页面被**显式**设成错误账户 → 仍然拦下来（防止真串账户 ✓）
+    desk._account_keys['chart:SHFE.ag2612#0'] = 'futu'
+    text = trader.place('SHFE.ag2612', 'buy', 1, 7000)
+    assert '请切换账户' in text
+    assert fut.calls == ['SHFE.ag2612', 'SHFE.ag2612']
+    desk._account_keys.pop('chart:SHFE.ag2612#0', None)
 
 
 def test_account_labels_split_stock_and_futures(tmp_path, monkeypatch):

@@ -22,6 +22,7 @@ import { showChartContextMenu } from './chart-context-menu';
 import { EYE_CLOSED, EYE_OPEN, GEAR } from '../general/legend';
 import { HorizontalLine } from '../horizontal-line/horizontal-line';
 import { AccountDock, type AccountPayload } from './account-dock';
+import { TicketBar } from './ticket-bar';
 // 「代码」页签（个人指标 / 策略编辑器，CodeMirror 懒加载 ✓）
 import { EditorPanel } from './editor-panel';
 import { AlertDialog } from '../panels/alert-dialog';
@@ -67,10 +68,13 @@ export interface ChartBar {
 
 export interface ChartPageOptions {
     symbol: string;
+    /** 本页页签 id（`chart:SHFE.rb2610`）：二级报价 / 买卖盘按页路由 ✓ */
+    pageId?: string;
     name?: string;
     cycle?: number;
     /** toolbar → backend */
-    onCycleChange?: (cycle: number) => void;
+    /** 换周期（`cell` = 鼠标最后点击的那一格 ✓） */
+    onCycleChange?: (cycle: number, cell?: number) => void;
     onChartTypeChange?: (kind: string) => void;
     onIndicatorMenu?: () => void;
     onClose?: () => void;
@@ -86,6 +90,16 @@ export interface ChartPageOptions {
     strategyFavorites?: Array<Record<string, unknown>>;
     /** 主题（副图背景色要用 ✓） */
     theme?: 'light' | 'dark';
+    /**
+     * 工具栏「买卖盘」→ 交给 DeskApp 持久化 + 通知后端订阅 / 退订盘口 ✓
+     *
+     * ⚠ 2026-11-04 起**只保留工具栏统一开关**（去掉逐格 👁）——
+     * `cells` = 当前布局每格的 `{cell, name}`，后端按格订阅盘口 ✓
+     */
+    onTicketAll?: (visible: boolean,
+                   cells: Array<{ cell: number; name: string }>) => void;
+    /** 全局买卖盘开关（打开页面时恢复 ✓） */
+    ticketVisibleOf?: () => boolean;
 }
 
 /** Chart kinds miniqt really supports (the other 11 are disabled placeholders). */
@@ -254,6 +268,14 @@ export class ChartPage {
     private toolBoxOn = false;
     /** 每格的 handler id（画线保存回调 `save_drawings<id>` 用它找格 ✓） */
     private readonly cellHandlerIds: string[] = [];
+    /**
+     * **每格**自己的周期（秒）：`cellCycles[i]`；没设过 → 跟页面周期 ✓
+     *
+     * 用户 2026-11-03：多布局里工具栏周期菜单只对格 1 生效、右键菜单却把
+     * **所有格**都换掉 ✗ → 周期改成按格存，工具菜单 / 右键都只作用于
+     * 鼠标最后点击的那一格。
+     */
+    private readonly cellCycles: number[] = [];
     /** 多布局画线：共用一个工具 + 按 `合约|周期` 持久化 ✓ */
     private drawingsSync: DrawingsSync | null = null;
     /** 左侧「画线」导航栏（整个图表区共用一条，对称于右侧二级报价 ✓） */
@@ -356,25 +378,25 @@ export class ChartPage {
     /** 每格的策略名（`payload.strategy`；空 = 没挂策略 ✓） */
     private readonly cellStrategy: string[] = [];
     private readonly cellHidden: Array<Set<string>> = [];
-    /** 图上买卖盘 */
-    private orderTicket: HTMLDivElement | null = null;
-    private orderTicketVisible = false;
+    /**
+     * 图上买卖盘 —— **每格一条**（`ticket-bar.ts`）✓
+     *
+     * 以前是整页一个 DOM，固定插进 `cells[0]` 的图例 → 多布局切布局后节点
+     * 留在被卸载的旧图例里（**完全不出现** ✗），本地图表也只有格 1 能看到 ✗
+     */
+    private readonly tickets: Array<TicketBar | null> = [];
+    /** 每格是否显示（👁 / 工具栏全局开关都改它 ✓） */
+    private readonly ticketVisible: boolean[] = [];
+    /** 页面级「买卖盘」总开关（工具栏按钮只切它 ✓） */
+    private ticketsOn = false;
+    /** 最近一次收到的盘口（新建格子 / 切布局后立刻回填 ✓） */
+    private ticketBook: {
+        bids: Array<{ price?: number | null }>;
+        asks: Array<{ price?: number | null }>;
+    } | null = null;
     private orderQty = 1;
     private orderPrice: number | null = null;
-    private ticketAsks: Array<{ price?: number | null }> = [];
-    private ticketBids: Array<{ price?: number | null }> = [];
-    /** 买一 / 卖一 / 净仓（正=多、负=空）✓ */
-    private ticketBid: number | null = null;
-    private ticketAsk: number | null = null;
-    private ticketNet = 0;
     private ticketDecimals = 2;
-    private ticketBuy: {
-        node: HTMLButtonElement; price: HTMLSpanElement; label: HTMLSpanElement;
-    } | null = null;
-    private ticketSell: {
-        node: HTMLButtonElement; price: HTMLSpanElement; label: HTMLSpanElement;
-    } | null = null;
-    private ticketSpread: HTMLDivElement | null = null;
     /** 指标选择器的二级筛选（后端偏好 `indicator_overlay_filter` ✓） */
     private indicatorFilter: 'all' | 'main' | 'sub' = 'all';
     /** 导出历史（后端 `exports` 补丁；看盘页也能打开 ✓） */
@@ -553,7 +575,7 @@ export class ChartPage {
         const linkButton = this._toolButton('联动', () => this.toggleLink(),
                                             '多图联动（时间轴 / 十字线同步）');
         const ticketButton = this._toolButton('买卖盘', () => this.toggleOrderTicket(),
-                                              '图上买卖盘（买入 / 点差 / 卖出，有仓→平仓）');
+                                              '买卖盘：显示 / 隐藏布局里所有图表的买卖盘');
         this.ticketButton = ticketButton;
         ticketButton.classList.add('desk-strategy-hide');
         const shotButton = this._toolButton('', () => this.screenshot(),
@@ -634,6 +656,7 @@ export class ChartPage {
         this.dock = new AccountDock((cmd, payload) => this.options.onCommand?.(
             cmd, payload));
         // ★ 底部面板最右的「最大化 / 恢复」按钮（P60）—— 构造时就接上 ✓
+        this.dock.pageId = this.options.pageId || '';
         this.dock.onToggleMaximize = () => this.toggleDockMaximize();
         // ★ 「代码」页签：第一次切过去时才建编辑器（P60 合并按钮后必须在这里接 ✗）
         this.dock.onEditorOpen = () => {
@@ -776,6 +799,7 @@ export class ChartPage {
             cols: this.layout.cols,
             rows: this.layout.rows,
             symbols: this.cellSymbols.slice(),
+            cycles: this.cellSymbols.map((_, index) => this.cycleOfCell(index)),
         });
     }
 
@@ -820,7 +844,15 @@ export class ChartPage {
         this.handler = this.cells[index] || this.handler;
         const symbol = this.cellSymbols[index] || this.options.symbol;
         if (symbol) this._setSymbolButton(symbol);
+        // ★ 工具栏「周期」显示**这一格**的周期（用户实测 2026-11-03 ✗）
+        this.cycleLabel.textContent = this._cycleText(this.cycleOfCell(index));
         if (!this.tradeLocked && symbol) this.setTradeSymbol(symbol);
+        // ★ 多布局：账户下拉框 / 交易账户面板跟着**这一格**（用户 2026-11-05）
+        //   每格可以有自己的账户（股票格 → 富途模拟，期货格 → 快期/实盘）✓
+        if (this.dock) this.dock.cell = index;
+        this.options.onCommand?.('account_kind', {
+            page: this.options.pageId || '', cell: index,
+        });
         // 画线导航条跟着活动格（多布局共用一个 ✓）
         if (this.toolBoxOn) this._applyToolBoxMode();
     }
@@ -930,6 +962,12 @@ export class ChartPage {
                 this._openIndicatorSettings(item, anchor, index);
             this.layers.push(layer);
         }
+        // ★ 每格周期数组跟着格子数对齐（多出来的丢、新的跟页面周期 ✓）
+        const count = this.cells.length;
+        for (let index = this.cellCycles.length; index < count; index += 1) {
+            this.cellCycles[index] = this.cycleOfCell(0);
+        }
+        this.cellCycles.length = count;
         this._buildSplitters();
         this._buildLegend();
         this.handler = this.cells[0] || null;
@@ -948,7 +986,8 @@ export class ChartPage {
                     .chart.applyOptions(chartTheme);
             } catch { /* ignore */ }
         }
-        if (this.orderTicketVisible) this._ensureOrderTicket();
+        this._restoreTickets();
+        this._ensureTickets();
         this._restoreCellLines();
         this._refreshDrawings();
     }
@@ -975,7 +1014,7 @@ export class ChartPage {
     /** 画线存储键：`合约|周期`（同品种不同周期各画各的 ✓） */
     private _drawingKey(index = this.activeCell): string {
         const symbol = this.cellSymbols[index] || this.options.symbol || '';
-        return `${symbol}|${Number(this.cycle) || 0}`;
+        return `${symbol}|${this.cycleOfCell(index)}`;
     }
 
     /** 重建格子 / 换合约 / 换周期后：按新键把画线画回来 ✓ */
@@ -1039,6 +1078,9 @@ export class ChartPage {
         // ③ 活动格：工具栏商品按钮 / 交易标的跟着换 ✓
         if (index === this.activeCell) {
             this._setSymbolButton(symbol, name);
+            // 周期按钮也跟着这一格走（每格可以不同周期 ✓）
+            this.cycleLabel.textContent = this._cycleText(
+                this.cycleOfCell(index));
             if (!this.tradeLocked) this.setTradeSymbol(symbol);
         }
         // ④ 第 1 格 = 页面主合约：报价面板 / 预警按它走（tab 名不变 ✓）
@@ -1049,7 +1091,8 @@ export class ChartPage {
             this._renderAlertLines();
         }
         this._placePositionBadge();
-        // ★ 换了合约 → 这一格的画线换成新键（合约|周期）✓
+        // ★ 换了合约 → 这一格的买卖盘也换成新合约（显隐按合约落盘 ✓）
+        this._restoreTickets();
         this._refreshDrawings();
     }
 
@@ -1453,10 +1496,8 @@ export class ChartPage {
                 this.openRemoveMenu(anchor);
                 window.setTimeout(() => anchor.remove(), 0);
             },
-            onCycle: (cycle) => {
-                this.setCycle(cycle);
-                this.options.onCycleChange?.(cycle);
-            },
+            // ★ 右键周期只切**鼠标最后点击/右键的那一格**（以前把所有格都换了 ✗）
+            onCycle: (cycle) => this.setCellCycle(this.activeCell, cycle),
             onLayoutPreset: (cols, rows) => this.setLayout(cols, rows),
             onLayoutApply: (key) => this.options.onCommand?.(
                 'layout_apply', { symbol: this.options.symbol, key }),
@@ -2113,7 +2154,11 @@ export class ChartPage {
             })?.resetPrice?.(price);
         }
         this.book.setSymbol(symbol);
-        this.options.onCommand?.('focus_chart', { symbol });
+        // ★ 二级报价面板也要跟着**鼠标最后点击的那一格**走（用户实测 2026-11-03 ✗）
+        //   以前只换标题 / `_book_focus` 也没记 → 数据一直是格 1 合约的
+        this.options.onCommand?.('focus_chart', {
+            symbol, page: this.options.pageId || '',
+        });
     }
 
     /** 某个合约的最新价（多格布局：取那一格的最后一根 K 线收盘 ✓） */
@@ -2194,7 +2239,7 @@ export class ChartPage {
         this.orderItemsByCell.clear();
         this.hidePositionLine();
         this.lastPositions.clear();
-        this.ticketNet = 0;
+        this.ticketVisible.forEach((_, index) => this.tickets[index]?.setNet(0));
         this.ticket?.setNet(0);
         this.setPosition({});
         this.legendItems = [];
@@ -2225,6 +2270,9 @@ export class ChartPage {
         this.options.symbol = symbol;
         this.options.name = name;
         this.activeCell = 0;
+        // ★ 单图换标的：第 1 格的合约也要跟着改（否则 `cellSymbols[0]` 还是
+        //   旧合约 → 账户补丁的品种校验会把新标的的账户数据挡掉 ✗）
+        if (this.cells.length <= 1) this.cellSymbols[0] = symbol;
         this._setSymbolButton(symbol, name);
         this.book.setSymbol(symbol);
     }
@@ -2899,14 +2947,83 @@ export class ChartPage {
         this._drawings().clear(this._drawingKey());
     }
 
-    /** 工具栏「买卖盘」→ 图上浮动买卖盘 ✓ */
+    /**
+     * 工具栏「买卖盘」→ **全局开关**（所有格一起开 / 关）✓
+     *
+     * 以前它是"整页一个布尔 + 格 1 的节点"，多格时语义错位 ✗。
+     * 现在每格一条（图例里带 👁），这个按钮只当"一键全开 / 全关"，
+     * 单格显隐走各格的眼睛 ✓（用户 2026-11-03 确认的设计）。
+     */
     toggleOrderTicket(visible?: boolean): boolean {
-        this.orderTicketVisible = visible === undefined
-            ? !this.orderTicketVisible : !!visible;
-        this.ticketButton?.classList.toggle('on', this.orderTicketVisible);
-        if (this.orderTicketVisible) this._ensureOrderTicket();
-        else this.orderTicket?.classList.remove('on');
-        return this.orderTicketVisible;
+        const next = visible === undefined ? !this.ticketsOn : !!visible;
+        this.setTicketVisibleAll(next, true);
+        return next;
+    }
+
+    /**
+     * 一键全开 / 全关（**工具栏「买卖盘」是唯一开关** ✓）
+     *
+     * 用户 2026-11-04：去掉每格行尾的 👁，布局里所有格统一由工具栏控制
+     * （"不用搞那么复杂"）。`notify` 时顺便让后端按格订阅 / 退订盘口 ✓
+     */
+    setTicketVisibleAll(visible: boolean, notify = false): void {
+        this.ticketsOn = !!visible;
+        this._ensureTickets();
+        for (let index = 0; index < this.cells.length; index += 1) {
+            this.ticketVisible[index] = this.ticketsOn;
+            this.tickets[index]?.setVisible(this.ticketsOn);
+            if (this.ticketsOn) this._applyTicketBook(index);
+        }
+        this.ticketButton?.classList.toggle('on', this.ticketsOn);
+        if (notify) {
+            this.options.onTicketAll?.(
+                this.ticketsOn,
+                this.cellSymbols.map((_symbol, index) => ({
+                    cell: index, name: this._ticketName(index),
+                })),
+            );
+        }
+    }
+
+    /**
+     * 初始状态：买卖盘**一律关闭** ✓
+     *
+     * 用户 2026-11-05：多布局出图时买卖盘是打开的（上次的开关被恢复了 ✗）
+     * → 现在每打开一页图表（含多布局的每一格）都从「关」开始，
+     *   要看得显式点工具栏「买卖盘」。
+     */
+    private _restoreTickets(): void {
+        this.ticketsOn = false;
+        this._ensureTickets();
+        for (let index = 0; index < this.cells.length; index += 1) {
+            this.ticketVisible[index] = this.ticketsOn;
+            this.tickets[index]?.setVisible(this.ticketsOn);
+        }
+        this.ticketButton?.classList.toggle('on', false);
+    }
+
+    /**
+     * 这个盘口补丁是不是**别的格**的（不是当前焦点合约）✓
+     *
+     * 多布局点格 2 后，若还有格 1 的 `book` 补丁进来，会把右侧面板的
+     * 合约 / 五档又改回格 1（用户实测 2026-11-04 ✗）→ 直接丢掉。
+     */
+    private _isStaleBook(data: { symbol?: string }): boolean {
+        const symbol = String((data as { symbol?: string })?.symbol || '');
+        if (!symbol) return false;                 // 没写合约 = 本地 / 回放 ✓
+        const focus = String(this.tradeSymbol || this.options.symbol || '');
+        return !!focus && symbol !== focus;
+    }
+
+    /** 买卖盘落盘的键：该格合约（`book_watch` 按格订阅用 ✓） */
+    private _ticketName(cell = 0): string {
+        return String(this.cellSymbols[cell]
+            || this.options.symbol || '');
+    }
+
+    private _cellIndex(cell: number): number {
+        const max = Math.max(0, this.cells.length - 1);
+        return Math.max(0, Math.min(Number(cell) || 0, max));
     }
 
     /**
@@ -2914,94 +3031,88 @@ export class ChartPage {
      *
      * 形态和 **minibt 实时图**一致：`买入 | 点差 | 卖出`；
      * 有仓位时变成 `买入 | 点差 | 平仓`（多仓）或 `平仓 | 点差 | 卖出`（空仓）。
+     * `cell` 指定时只刷那一格（多布局每格自己的合约 ✓）。
      */
     setTicketBook(data: {
         bids?: Array<{ price?: number | null }>;
         asks?: Array<{ price?: number | null }>;
-    }): void {
-        this.ticketAsks = (data.asks || []).slice(0, 5);
-        this.ticketBids = (data.bids || []).slice(0, 5);
-        const bid = Number(this.ticketBids[0]?.price);
-        const ask = Number(this.ticketAsks[0]?.price);
-        if (Number.isFinite(bid)) this.ticketBid = bid;
-        if (Number.isFinite(ask)) this.ticketAsk = ask;
-        this._renderTicket();
+        symbol?: string;
+    }, cell?: number): void {
+        this.ticketBook = {
+            bids: (data?.bids || []).slice(0, 5),
+            asks: (data?.asks || []).slice(0, 5),
+        };
+        if (typeof cell === 'number' && Number.isFinite(cell)) {
+            this._applyTicketBook(this._cellIndex(cell));
+            return;
+        }
+        this._ensureTickets();
+        const symbol = String(data?.symbol || '');
+        let matched = false;
+        for (let index = 0; index < this.cells.length; index += 1) {
+            const name = this._ticketName(index);
+            if (symbol && name && name !== symbol) continue;
+            matched = matched || !!symbol;
+            this._applyTicketBook(index);
+        }
+        if (!matched) {
+            // 没写 `symbol`（本地 / 回放）→ 所有格都用这份盘口 ✓
+            for (let index = 0; index < this.cells.length; index += 1) {
+                this._applyTicketBook(index);
+            }
+        }
+    }
+
+    private _applyTicketBook(cell: number): void {
+        const bar = this.tickets[cell];
+        if (!bar || !this.ticketBook) return;
+        bar.setDecimals(this.ticketDecimals);
+        bar.setBook(this.ticketBook);
     }
 
     /** 外部（二级报价 / 5 档点击）同步价格 → 填进「价格」输入框 ✓ */
     setTicketPrice(price: number | null, force = false): void {
         if (price === null || !Number.isFinite(Number(price))) return;
         this.orderPrice = Number(price);
-        const input = this.orderTicket?.querySelector<HTMLInputElement>(
-            '.desk-ticket-price');
-        if (input) input.value = this.orderPrice.toFixed(this.ticketDecimals);
         // ★ 点二级报价 10 档 → 强制填进**统一交易面板**的价格框（用户要求 ✓）
         this.ticket?.setPriceForce(this.orderPrice);
         void force;
     }
 
-    /** 点差 = |卖一 − 买一| ✓ */
-    private _spread(): number | null {
-        if (this.ticketBid === null || this.ticketAsk === null) return null;
-        return Math.abs(this.ticketAsk - this.ticketBid);
-    }
-
-    private _ensureOrderTicket(): void {
-        if (!this.orderTicket) {
-            const box = document.createElement('div');
-            box.className = 'desk-ticket';
-            const row = document.createElement('div');
-            row.className = 'desk-ticket-row';
-            const makeSide = (side: 'buy' | 'sell') => {
-                const node = document.createElement('button');
-                node.className = `desk-ticket-side ${side}`;
-                node.title = side === 'buy'
-                    ? '买入（市价加多；空头时＝平仓）' : '卖出（市价加空；多头时＝平仓）';
-                const price = document.createElement('span');
-                price.className = 'desk-ticket-price';
-                price.textContent = '--';
-                const label = document.createElement('span');
-                label.className = 'desk-ticket-label';
-                label.textContent = side === 'buy' ? '买入' : '卖出';
-                node.append(price, label);
-                node.addEventListener('click', () => this._ticketClick(side));
-                return { node, price, label };
-            };
-            const buy = makeSide('buy');
-            const spread = document.createElement('div');
-            spread.className = 'desk-ticket-spread';
-            spread.textContent = '--';
-            spread.title = '点差（卖一 − 买一）';
-            const sell = makeSide('sell');
-            row.append(buy.node, spread, sell.node);
-            this.ticketBuy = buy;
-            this.ticketSell = sell;
-            this.ticketSpread = spread;
-            // ★ 只有三个格子：**没有手数 / 价格 / 档位输入**，
-            //   手数取二级报价里的手数，下单是市价（set_target_volume ✓）
-            box.append(row);
-            // 和 minibt 实时图一样插进**原生图例**（OHLC 行下面、指标行上面）
-            const cell = this.cells[0] as unknown as {
+    /**
+     * **每格**一条买卖盘：建在图例里（OHLC 行下面、指标行上面）✓
+     *
+     * 切布局 / 新加格子后调用（`cells` 重建 → 旧的图例节点被卸载，
+     * 必须重新挂 ✓，这就是以前"多布局里买卖盘不见了"的根因）。
+     */
+    private _ensureTickets(): void {
+        for (let index = 0; index < this.cells.length; index += 1) {
+            const existing = this.tickets[index];
+            // `isConnected === false` 才是真的脱落（切布局后旧图例被卸载 ✗）
+            if (existing && existing.element.isConnected !== false) {
+                existing.setVisible(this.ticketsOn);
+                continue;
+            }
+            const cell = this.cells[index] as unknown as {
                 legend?: { div?: HTMLElement; seriesContainer?: HTMLElement };
             } | undefined;
-            const legend = cell?.legend;
-            let placed = false;
-            const legendDiv = legend?.div;
-            if (legendDiv instanceof HTMLElement) {
-                const wrapper = legend?.seriesContainer?.parentNode;
-                if (wrapper && wrapper.parentNode === legendDiv) {
-                    legendDiv.insertBefore(box, wrapper);
-                } else {
-                    legendDiv.appendChild(box);
-                }
-                placed = true;
+            const legendDiv = cell?.legend?.div;
+            if (!(legendDiv instanceof HTMLElement)) continue;
+            const bar = new TicketBar({
+                decimals: this.ticketDecimals,
+                visible: this.ticketsOn,
+                onOrder: (side) => this._ticketClick(side),
+                title: '买卖盘（工具栏「买卖盘」统一显示 / 隐藏）',
+            });
+            const wrapper = cell?.legend?.seriesContainer?.parentNode;
+            if (wrapper && wrapper.parentNode === legendDiv) {
+                legendDiv.insertBefore(bar.element, wrapper);
+            } else {
+                legendDiv.appendChild(bar.element);
             }
-            if (placed) box.classList.add('in-legend');
-            else this.element.appendChild(box);
-            this.orderTicket = box;
+            this.tickets[index] = bar;
+            this._applyTicketBook(index);
         }
-        this._renderTicket();
-        this.orderTicket.classList.add('on');
     }
 
     /**
@@ -3015,35 +3126,6 @@ export class ChartPage {
         this.options.onCommand?.('ticket_order', {
             symbol: this.options.symbol, side, qty,
         });
-    }
-
-    /** 刷新买卖盘（价格 / 点差 / 标签 / 颜色 ✓） */
-    private _renderTicket(): void {
-        if (!this.orderTicket) return;
-        const decimals = this.ticketDecimals;
-        const bid = this.ticketBid;
-        const ask = this.ticketAsk;
-        const net = this.ticketNet;
-        const leftClose = net < 0;
-        const rightClose = net > 0;
-        const left = this.ticketBuy;
-        const right = this.ticketSell;
-        if (left) {
-            left.price.textContent = ask === null ? '--' : ask.toFixed(decimals);
-            left.label.textContent = leftClose ? '平仓' : '买入';
-            left.node.classList.toggle('flat', leftClose);
-        }
-        if (right) {
-            right.price.textContent = bid === null ? '--' : bid.toFixed(decimals);
-            right.label.textContent = rightClose ? '平仓' : '卖出';
-            right.node.classList.toggle('flat', rightClose);
-        }
-        const spread = this._spread();
-        if (this.ticketSpread) {
-            this.ticketSpread.textContent = spread === null
-                ? '--' : spread.toFixed(decimals);
-        }
-        this.orderTicket.classList.toggle('has-position', !!net);
     }
 
     /** 轻提示（回放结束等 ✓） */
@@ -3094,6 +3176,31 @@ export class ChartPage {
     private _linkGuard = false;
 
     /**
+     * 联动**回声保护**（2026-11-03 用户实测 ✗）
+     *
+     * 以前 `subscribeVisibleLogicalRangeChange` 里直接
+     * `setVisibleLogicalRange(range)` 推给别的格 —— A 推 B、B 又推回 A，
+     * 无限互推；实时行情每笔都触发**自动滚动**（也走同一个回调），
+     * 用户的手动平移立刻被覆盖，两图各自 clamp 到数据右端
+     * → 「最新 K 线永远贴右边 + 越拖越放大」✗
+     *
+     * `_linkApplying`：程序化设置期间不广播；
+     * `_linkApplied`：记住每格**被别人推过来**的区间，收到等值回调不再回推 ✓
+     */
+    private _linkApplying = false;
+
+    private readonly _linkApplied: Array<{ from: number; to: number } | null>
+        = [];
+
+    private static _sameRange(a: { from: number; to: number } | null | undefined,
+                              b: { from: number; to: number } | null | undefined,
+                              epsilon = 1e-3): boolean {
+        if (!a || !b) return false;
+        return Math.abs(a.from - b.from) <= epsilon
+            && Math.abs(a.to - b.to) <= epsilon;
+    }
+
+    /**
      * 联动：**时间轴 + 十字线**都同步（多格 / 回放都生效 ✓）
      *
      * LWC 没有「把十字线设到某个时间」的公开 API 之外的办法，
@@ -3123,15 +3230,31 @@ export class ChartPage {
             // ① 可视区间同步
             chart.timeScale().subscribeVisibleLogicalRangeChange(
                 (range: unknown) => {
-                    if (!this.linked || !range) return;
-                    charts.forEach((other, otherIndex) => {
-                        if (otherIndex === index) return;
-                        try {
-                            other.timeScale().setVisibleLogicalRange(range);
-                        } catch {
-                            /* ignore */
-                        }
-                    });
+                    if (!this.linked || !range || this._linkApplying) return;
+                    const value = range as { from?: unknown; to?: unknown };
+                    const from = Number(value.from);
+                    const to = Number(value.to);
+                    if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+                    // ★ 这是我们刚推给这一格的区间（回声）→ 不再回推 ✗
+                    if (ChartPage._sameRange({ from, to },
+                                             this._linkApplied[index])) {
+                        return;
+                    }
+                    this._linkApplying = true;
+                    try {
+                        charts.forEach((other, otherIndex) => {
+                            if (otherIndex === index) return;
+                            this._linkApplied[otherIndex] = { from, to };
+                            try {
+                                other.timeScale().setVisibleLogicalRange(
+                                    { from, to });
+                            } catch {
+                                /* ignore */
+                            }
+                        });
+                    } finally {
+                        this._linkApplying = false;
+                    }
                 });
             // ★ 跨周期联动：把**时间区间**广播给别的 tab ✓
             (chart.timeScale() as unknown as {
@@ -3539,21 +3662,23 @@ export class ChartPage {
                         ? '已锁定：不会跟随图表点击切换标的'
                         : '未锁定：跟随最后点击的图表切换标的');
                 },
-                onOrder: (side, close) => {
+                onOrder: (order) => {
+                    // ★ 快期四按钮：方向 + 开平 + 实际手数都由按钮决定 ✓
                     const payload = {
-                        symbol: this.tradeSymbol || this.options.symbol, side,
-                        qty: this.ticket?.qtyValue() || 1,
+                        symbol: this.tradeSymbol || this.options.symbol,
+                        side: order.side,
+                        offset: order.offset,
+                        volume: order.volume,
+                        qty: order.volume,
                         price: this.ticket?.priceValue() || 0,
-                        close,
                     };
                     if (this.replaying) {
                         this.options.onCommand?.('replay_order', payload);
                         return;
                     }
-                    const label = close ? '平仓'
-                        : (side === 'buy' ? '买入' : '卖出');
+                    const label = order.label;
                     const priceText = payload.price
-                        ? `@ ${payload.price}` : '@ 市价';
+                        ? `@ ${payload.price}` : '@ 对手价';
                     if (this.accountReal && !window.confirm(
                         `【实盘】${label} ${payload.symbol} `
                         + `${payload.qty} 手 ${priceText}
@@ -3571,7 +3696,7 @@ export class ChartPage {
                         return;
                     }
                     const names: Record<string, string> = {
-                        close_main: '按最新价市价平仓',
+                        close_main: '按对手价平掉全部持仓',
                         reverse: '反手（多空反转）',
                         cancel: '撤掉未成交的挂单',
                     };
@@ -3584,7 +3709,7 @@ export class ChartPage {
                     }
                     this.options.onCommand?.('account_action', payload);
                 },
-                info: '平仓 = 按上面的价格平当前持仓',
+                info: '价格留空=市价；填了价格=限价挂单（等价格触发，图上有线）',
             });
         }
         const ticket = this.ticket;
@@ -3592,7 +3717,7 @@ export class ChartPage {
         ticket.setSymbol(this.tradeSymbol || this.options.symbol);
         ticket.setInfo(replaying
             ? '回放中按当前 K 线价成交 · 退出回放自动切回天勤账户'
-            : '点二级报价档位可填价格 · 平仓=按价格；市价平仓=市价');
+            : '价格留空=市价；填了价格=限价挂单（等价格触发）');
         ticket.setPrice(this._lastPriceValue());
         this.dock.setTicket(ticket.element);
         if (replaying) {
@@ -3615,8 +3740,13 @@ export class ChartPage {
 
     /** 已有持仓时把手数默认成持仓量（平仓一键成交 ✓） */
     private _bindTicketPositionQuantity(): void {
-        const net = Math.abs(this.ticketNet || 0);
-        if (net > 0) this.ticket?.setNet(this.ticketNet || 0);
+        const net = Math.abs(this._ticketNet(0));
+        if (net > 0) this.ticket?.setNet(this._ticketNet(0));
+    }
+
+    /** 某一格的净仓（买卖盘「平仓」标签用它 ✓） */
+    private _ticketNet(cell = 0): number {
+        return this.tickets[this._cellIndex(cell)]?.netPosition || 0;
     }
 
     /** 最后一根收盘价（控件价格输入框的默认值 ✓） */
@@ -4493,15 +4623,22 @@ export class ChartPage {
         this.dock.appendLog(text, level, ts);
     }
 
-    /** 净仓 → 买卖盘标签（多仓右侧平仓 / 空仓左侧平仓 ✓） */
+    /**
+     * 净仓 → **该格**买卖盘标签（多仓右侧平仓 / 空仓左侧平仓 ✓）
+     *
+     * 多布局每格一个合约 → 净仓必须按格来（以前一个 `ticketNet` 混在一起 ✗）
+     */
     private _setTicketPosition(
-            payload: { long?: PosSide | null; short?: PosSide | null }): void {
+            payload: { long?: PosSide | null; short?: PosSide | null },
+            cell = 0): void {
         const long = Number(payload?.long?.volume || 0);
         const short = Number(payload?.short?.volume || 0);
-        const net = Math.round(long - short);
-        if (net === this.ticketNet) return;
-        this.ticketNet = net;
-        this._renderTicket();
+        this._ensureTickets();
+        this.tickets[this._cellIndex(cell)]?.setNet(Math.round(long - short));
+        // ★ 交易面板的四按钮要看**多 / 空各多少手**（锁仓 = 两边都有 ✓）
+        if (this._cellIndex(cell) === 0) {
+            this.ticket?.setPosition(long, short);
+        }
     }
 
     /** 导出历史（`app.ts` 收到 `exports` 补丁时分发过来 ✓） */
@@ -4631,21 +4768,47 @@ export class ChartPage {
         const value = Math.max(0, Math.min(6, Math.round(decimals)));
         if (value === this.ticketDecimals) return;
         this.ticketDecimals = value;
-        this._renderTicket();
+        for (let index = 0; index < this.tickets.length; index += 1) {
+            this.tickets[index]?.setDecimals(value);
+        }
         this.alertDialog?.setDecimals(value);
     }
 
-    /** 二级报价（5 档 + 信息 + 分笔）—— 只读，P4 才有下单按钮 ✓ */
-    setBook(data: BookData): void {
+    /**
+     * 二级报价（5 档 + 信息 + 分笔）—— 只读，P4 才有下单按钮 ✓
+     *
+     * `cell` 指定时只刷那一格的买卖盘（多布局每格自己的合约 ✓）
+     */
+    setBook(data: BookData, cell?: number): void {
         const decimals = Number((data as unknown as { decimals?: number })
             .decimals);
         if (Number.isFinite(decimals)) this.setDecimals(decimals);
+        const book = { bids: data.bids || [], asks: data.asks || [] };
+        // ★ 带 `cell`：**只**刷那一格的买卖盘（`book_watch` 按格推的 ✓）
+        //   不能顺手改右侧「二级报价」面板，否则两格同时开着眼睛时会来回跳 ✗
+        if (typeof cell === 'number' && Number.isFinite(cell)) {
+            this.setTicketBook(book, cell);
+            return;
+        }
+        // ★ 多布局：不是**当前焦点合约**（鼠标最后点的那一格）的盘口就丢掉 ——
+        //   否则格 1 的盘口补丁会把面板标题从格 2 又改回格 1 ✗（用户实测 2026-11-04）
+        if (this._isStaleBook(data)) {
+            this.setTicketBook(book);
+            return;
+        }
         // ★ 价格步进 = 合约最小变动价位（上下键 / 箭头按它调 ✓）
         const tick = Number((data as unknown as { price_tick?: number })
             .price_tick);
         if (Number.isFinite(tick) && tick > 0) this.ticket?.setStep(tick);
+        // ★ 价格框为空时 ↑↓ 用买一 / 卖一（用户 2026-11-05 ✓）
+        const bidOne = Number((data.bids || [])[0]?.price);
+        const askOne = Number((data.asks || [])[0]?.price);
+        this.ticket?.setBookPrices(
+            Number.isFinite(bidOne) ? bidOne : null,
+            Number.isFinite(askOne) ? askOne : null);
         this.book.setBook(data);
-        this.setTicketBook({ bids: data.bids || [], asks: data.asks || [] });
+        // 没有 `cell` = **当前焦点合约**的盘口：面板 + 同名格的买卖盘都刷新 ✓
+        this.setTicketBook(book);
         // ★ 价格框跟随**当前交易标的**的最新价（用户手填过就不动 ✓）
         const target = this.tradeSymbol || this.options.symbol;
         if (!data.symbol || data.symbol === target) {
@@ -4673,8 +4836,12 @@ export class ChartPage {
         // 交易面板的净仓只跟**当前交易标的**走（多格时不能混在一起 ✓）
         const symbol = this.cellSymbols[index] || this.options.symbol;
         const focus = this.tradeSymbol || this.options.symbol;
+        // ★ 每格自己的买卖盘都要更新（以前只喂格 1 ✗）
+        this._setTicketPosition(payload, index);
         if (index === 0 || symbol === focus) {
-            this._setTicketPosition(payload);
+            this.ticket?.setPosition(
+                Number(payload?.long?.volume || 0),
+                Number(payload?.short?.volume || 0));
         }
         this._applyPositionLine(payload, index);
     }
@@ -4860,7 +5027,12 @@ export class ChartPage {
             const price = Number(item.price);
             if (!Number.isFinite(price) || price <= 0) continue;
             const side = String(item.side || '买');
-            const color = side === '卖' ? '#ef5350' : '#26a69a';
+            // ★ 平仓委托（`offset` = 平 / 平今）画成**平仓线**：橙色 + 「平仓」字样，
+            //   和挂单线一样贴在图表左边缘；成交 / 撤单后后端会推空列表 → 线消失 ✓
+            const offset = String(item.offset || '开');
+            const isClose = offset.startsWith('平');
+            const color = isClose ? '#ffb74d'
+                : (side === '卖' ? '#ef5350' : '#26a69a');
             const line = new HorizontalLine(
                 { time: null, logical: 0 as never, price },
                 {
@@ -4883,11 +5055,13 @@ export class ChartPage {
             const badge = document.createElement('div');
             badge.className = 'desk-order-badge';
             const qty = Number(item.qty) || 0;
-            const text = `挂单${side}${qty ? Math.round(qty) : ''}手 `
+            const text = `${isClose ? '平仓' : '挂单'}${side}`
+                + `${qty ? Math.round(qty) : ''}手 `
                 + price.toFixed(this.ticketDecimals);
             badge.textContent = text;
-            badge.title = `${side}${String(item.offset || '开')} ${qty} 手`
-                + ` @ ${price}（未成交）`;
+            badge.title = `${side}${offset} ${qty} 手 @ ${price}`
+                + `（未成交：价格到 ${price} 才触发）`;
+            badge.classList.toggle('close', isClose);
             badge.style.borderColor = color;
             badge.style.color = color;
             badge.dataset.price = String(price);
@@ -5042,6 +5216,39 @@ export class ChartPage {
         this.alertLines = [];
     }
 
+    /** 某一格的周期（没单独设过 → 页面周期 ✓） */
+    cycleOfCell(cell = 0): number {
+        const value = Number(this.cellCycles[cell]);
+        if (Number.isFinite(value) && value > 0) return value;
+        return Number(this.cycle) || 60;
+    }
+
+    /**
+     * **只给某一格**换周期（工具栏 / 右键 / 自定义周期都走这里 ✓）
+     *
+     * 第 1 格同时更新页面周期（`this.cycle`）：tab 名 / 画线键 / 回放参数
+     * 都以它为准，保持旧行为；其它格各存各的 ✓。
+     */
+    setCellCycle(cell: number, cycle: number): void {
+        const index = Math.max(0, Math.min(Number(cell) || 0,
+                                         Math.max(0, this.cells.length - 1)));
+        const value = Number(cycle);
+        if (!Number.isFinite(value) || value <= 0) return;
+        this.cellCycles[index] = value;
+        if (index === 0) this.cycle = value;
+        if (index === this.activeCell) {
+            this.cycleLabel.textContent = this._cycleText(value);
+        }
+        // 画线按「合约|周期」存 → 换周期要换一套 ✓
+        this._refreshDrawings();
+        // 回放工具条上的「周期」按钮也跟着走（用户没手动换过才跟 ✓）
+        if (this.replayCycleLabel && !this.replayCycle) {
+            this.replayCycleLabel.textContent = this._cycleText(value);
+        }
+        this._syncLayoutToBackend();
+        this.options.onCycleChange?.(value, index);
+    }
+
     setCycle(cycle: number): void {
         this.cycle = cycle;
         this.cycleLabel.textContent = this._cycleText(cycle);
@@ -5060,10 +5267,8 @@ export class ChartPage {
 
     /** 周期菜单：`＋ 添加自定义周期…` + `秒/分/时/天` 二级 + `范围` ✓ */
     private _openCycleMenu(anchor: HTMLElement): void {
-        const pick = (value: number) => {
-            this.setCycle(value);
-            this.options.onCycleChange?.(value);
-        };
+        // ★ 工具栏周期只切**当前格**（多布局里以前只生效于格 1 ✗）
+        const pick = (value: number) => this.setCellCycle(this.activeCell, value);
         const items: MenuItem[] = [
             { label: '＋ 添加自定义周期…', run: () => this._promptCycle() },
         ];
@@ -5093,15 +5298,14 @@ export class ChartPage {
     private _promptCycle(): void {
         const text = window.prompt(
             '自定义周期（数字=秒；也可写 5分 / 2时 / 3天 / 1周）',
-            String(this.cycle));
+            String(this.cycleOfCell(this.activeCell)));
         if (!text) return;
         const value = parseCycle(text);
         if (!value) {
             this.toast('周期要大于 0（例：90 / 5分 / 2时 / 3天）');
             return;
         }
-        this.setCycle(value);
-        this.options.onCycleChange?.(value);
+        this.setCellCycle(this.activeCell, value);
     }
 
     /** 显示范围（`0` = 全部 ✓） */

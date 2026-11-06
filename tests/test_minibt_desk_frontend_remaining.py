@@ -126,7 +126,8 @@ def test_stock_trade_ui_and_polling():
     assert "values.trd_env" in login
     app = (ROOT / 'minibt' / 'desk' / 'app.py').read_text(encoding='utf-8')
     assert "params.get('trade')" in app
-    assert "trd_env=str(params.get('trd_env')" in app
+    assert "trd_env=trade_env" in app          # 统一成大写 / 校验后的值 ✓
+    assert "or trade_env == 'SIMULATE'" in app  # 模拟盘强制连官方账户 ✓
     stock = (ROOT / 'minibt' / 'stock_api.py').read_text(encoding='utf-8')
     assert 'def _refresh_real_orders' in stock
     assert 'order_list_query' in stock

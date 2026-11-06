@@ -100,11 +100,13 @@ def test_desk_payloads_normalize_colors():
     assert catalog._norm_color('#ef5350') == '#ef5350'
     source = (ROOT / 'minibt' / 'desk' / 'indicator_catalog.py').read_text(
         encoding='utf-8')
-    assert "_norm_color(style.get('vbar_up_color'))" in source
-    assert "'upColor': _norm_color(bull)" in source
+    # ★ 柱体涨跌色走 `_vbar_color()`：调色板默认色（`Colors.bull_color`
+    #   那种半透明）当成"没设置"→ 主题 K 线涨跌色（用户 2026-11-03）
+    assert "_vbar_color(style.get('vbar_up_color'))" in source
+    assert "'upColor': _norm_color(bull)" in source      # 蜡烛型指标照旧 ✓
     overlay = (ROOT / 'minibt' / 'desk' / 'strategy_overlay.py').read_text(
         encoding='utf-8')
-    assert '_nc = lambda value: value' in overlay        # 兜底（旧 pylightcharts）
+    assert '_vbar_color = lambda value: value' in overlay   # 兜底 ✓
 
 
 def test_realtime_wires_normalize_color():

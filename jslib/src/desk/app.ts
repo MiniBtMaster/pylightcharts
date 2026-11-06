@@ -103,6 +103,15 @@ export class DeskApp {
     private settingsButton: HTMLButtonElement | null = null;
     private addButton: HTMLButtonElement | null = null;
     private home: HomePage | null = null;
+
+    /**
+     * 上次记住的登录信息（每打开登录框都**同步**预填 ✓）
+     *
+     * 用户 2026-11-05：第二次打开登录框数据就没了 ✗
+     * → 除了后端文件，前端也留一份：`openLogin()` 直接用它填，
+     *   不必等后端 `login_info` 回来（慢一拍就显示空白）。
+     */
+    private loginCache: Record<string, Record<string, any>> = {};
     private markets: HomeMarkets = {
         futures: false, stocks: false, offline: true, no_service: true,
     };
@@ -133,6 +142,55 @@ export class DeskApp {
     private settingsPage: SettingsPage | null = null;
     /** 后端推来的偏好设置（设置页读它 ✓） */
     private settingsValues: SettingsValues = {};
+
+    /** UI 卡顿心跳（`requestAnimationFrame` 句柄）✓ */
+    private stallTimer = 0;
+
+    /**
+     * 买卖盘总开关（落盘 `settings.ticket_visible_on` ✓）
+     *
+     * 用户 2026-11-04：**去掉每格行尾的 👁**，布局里所有格的买卖盘统一由
+     * 工具栏「买卖盘」按钮控制（"不用搞那么复杂"）。
+     */
+    private ticketsOn = false;
+
+    /** 统一账户目录（`account_kind` 补丁；首页 / 交易页共用 ✓） */
+    private accountKind: Record<string, unknown> | null = null;
+
+    /** 最近一次首页账户卡数据（`home_account` 补丁，合并用 ✓） */
+    private homeAccount: Record<string, unknown> | null = null;
+
+    /** 把账户目录转成首页账户卡能吃的形状（保留原来的 values / label） */
+    private _accountKindAsHome(): Record<string, unknown> {
+        const catalog = (this.accountKind || {}) as {
+            items?: Array<{ key?: string; label?: string; available?: boolean;
+                            kind?: string }>;
+            active?: string;
+        };
+        const items = catalog.items || [];
+        const active = String(catalog.active || 'kq');
+        const current = items.find((item) => item.key === active) || {};
+        const previous = (this.homeAccount || {}) as {
+            choices?: Array<Record<string, unknown>>; key?: string;
+        };
+        // ★ 目录为空（还没登录 / 后端没推）时**保留上一次的选项**，
+        //   否则首页「切账户」下拉框会变空（用户 2026-11-05 ✗）
+        const choices = items.length
+            ? items.map((item) => ({
+                key: item.key, kind: item.kind, label: item.label,
+                available: item.available,
+            }))
+            : (previous.choices || []);
+        return {
+            ...(this.homeAccount || {}),
+            key: items.length ? active : String(previous.key || active),
+            kind: current.kind || (this.homeAccount as never as {
+                kind?: string })?.kind || 'futures',
+            label: current.label || (this.homeAccount as never as {
+                label?: string })?.label || '快期模拟',
+            choices,
+        };
+    }
     /** 本地 LSP（jedi）地址；`null` = 还没起来 / 不可用 ✓ */
     private lspInfo: {
         url: string; root: string;
@@ -289,7 +347,33 @@ export class DeskApp {
     }
 
     /** Tell the backend we are ready (it answers with a `boot` patch). */
+    /**
+     * 界面卡顿自测：`requestAnimationFrame` 的间隔一旦变大，说明 **JS 主线程
+     * 被卡住**（补丁太多 / 同步渲染 / WebSocket 堵塞）。超过 1.5s 就上报一次，
+     * 后端写进运行日志 —— 用户报"界面卡死几分钟"时这是唯一能定位的线索 ✓
+     */
+    private _watchStall(): void {
+        if (this.stallTimer) return;
+        let last = performance.now();
+        let reported = 0;
+        const tick = () => {
+            const now = performance.now();
+            const span = now - last;
+            last = now;
+            if (span > 1500 && now - reported > 30000) {
+                reported = now;
+                this.send('ui_stall', {
+                    ms: Math.round(span),
+                    page: this.activeId,
+                });
+            }
+            this.stallTimer = window.requestAnimationFrame(tick);
+        };
+        this.stallTimer = window.requestAnimationFrame(tick);
+    }
+
     boot(): void {
+        this._watchStall();
         this.send('ready', {
             transport: this.transport.kind,
             width: window.innerWidth,
@@ -428,7 +512,8 @@ export class DeskApp {
             },
             */
             {
-                label: futuresOn ? '期货已连接（重新登录…）' : '登录期货账户（天勤）…',
+                label: futuresOn ? '切换 / 重新登录期货账户…'
+                    : '登录期货账户（天勤）…',
                 separator: true,
                 // ⚠ 首页暂停用 → 登录不再打开首页（只弹登录框 ✓）
                 run: () => this.openLogin('futures'),
@@ -453,6 +538,14 @@ export class DeskApp {
             this.login = new LoginDialog({
                 theme: this.theme,
                 onSubmit: (target, values) => {
+                    if (target === 'futures' && this.markets.futures) {
+                        // ★ 换账户会断开旧连接 → 二次确认（用户 2026-11-05 要求 ✓）
+                        const ok = window.confirm(
+                            '将断开当前账户并重新订阅，确认？'
+                            + '\n\n同一组账户不会重连；换账户后图表会自动补齐数据');
+                        if (!ok) return;
+                        (values as Record<string, unknown>).switch = true;
+                    }
                     this.send(target === 'stocks'
                         ? 'connect_stocks' : 'connect_futures', values);
                 },
@@ -469,11 +562,18 @@ export class DeskApp {
                     this.send('open_url', { url: urls[which] || urls.futu });
                 },
                 onCommand: (target) => this.send('login_info', { kind: target }),
+                // ★ 字段一变就落盘（不依赖点「登录」✓ 用户 2026-11-05）
+                onDirty: (kind, values) => {
+                    this.loginCache[kind] = { ...values };
+                    this.send('login_save', { kind, values });
+                },
             });
         }
         this.login.setTheme(this.theme);
-        this.login.open(kind, saved);
-        if (!saved) this.send('login_info', { kind });
+        // ★ 先用**前端缓存**同步预填（点开就有数据，不等后端 ✓）
+        const cached = saved || this.loginCache[kind] || null;
+        this.login.open(kind, cached);
+        this.send('login_info', { kind });        // 后端再校正一次 ✓
         return this.login;
     }
 
@@ -1096,6 +1196,9 @@ export class DeskApp {
             tvKey: key,
             // 连了股票 / 期货 → 商品搜索框走在线搜索（否则照旧搜本地数据 ✓）
             online: () => !!(this.markets.futures || this.markets.stocks),
+            onTicketAll: (visible, cells) =>
+                this._rememberTicket(visible, cells, id),
+            ticketVisibleOf: () => this.ticketsOn,
             theme: this.theme,
             cycle: 60,
             onCycleChange: () => undefined,      // 周期由数据决定（禁用 ✓）
@@ -1521,7 +1624,9 @@ export class DeskApp {
     /** 后端推来的设置 → 一次性应用到界面 ✓ */
     private _applySettings(values: Record<string, unknown>): void {
         if (!values) return;
-        if ('ui_zoom' in values) this._applyZoom(Number(values.ui_zoom) || 0);
+        // ★ 没设置过 = **100%**（不缩放）；`0` 才是「跟随系统」✓
+        this._applyZoom(values.ui_zoom === undefined
+            || values.ui_zoom === null ? 1 : Number(values.ui_zoom) || 0);
         if ('theme_accent' in values) {
             this._applyAccent(String(values.theme_accent || ''));
         }
@@ -1629,11 +1734,15 @@ export class DeskApp {
         const currentSymbol = () => pageRef?.symbol || symbol;
         const page = new ChartPage({
             symbol,
+            pageId: `chart:${symbol}`,     // 二级报价 / 买卖盘按页路由 ✓
             theme: this.theme,
             name: options.name,
             cycle: options.cycle,
-            onCycleChange: (cycle) => this.send('set_cycle', {
-                symbol: currentSymbol(), cycle,
+            // ★ 换周期要带**鼠标最后点击的那一格**（多布局每格自己一个周期 ✓）
+            onCycleChange: (cycle, cell) => this.send('set_cycle', {
+                symbol: pageRef?.symbolForCell(cell ?? 0) || currentSymbol(),
+                cycle,
+                cell: Number(cell ?? 0),
             }),
             onChartTypeChange: (kind) => this.send('set_chart_type', {
                 symbol: currentSymbol(), kind,
@@ -1654,6 +1763,10 @@ export class DeskApp {
             onToast: (level, text) => this.toast(level, text),
             favorites: this.favorites,
             strategyFavorites: this.strategyFavorites,
+            // 买卖盘：每格 👁 → 落盘 + 让后端订阅 / 退订该格盘口 ✓
+            onTicketAll: (visible, cells) =>
+                this._rememberTicket(visible, cells, `chart:${symbol}`),
+            ticketVisibleOf: () => this.ticketsOn,
         });
         pageRef = page;
         page.element.style.display = 'none';
@@ -1678,6 +1791,8 @@ export class DeskApp {
         // ★ 跨周期联动：任一 tab 拖动时间轴 → 其它 tab 按**时间**对齐 ✓
         page.onRangeChange = (from, to) => this._broadcastRange(id, from, to);
         this.send('trading_state', { symbol });
+        // ★ 这一页的账户目录（下拉框选项 / 当前 key 各自独立 ✓）
+        this.send('account_kind', { page: `chart:${symbol}` });
         this.send('alerts', {});
         this.send('favorites', {});
         this.send('templates', {});
@@ -1745,6 +1860,22 @@ export class DeskApp {
     }
 
     /** 下一个可用的「本地图表N」编号（1 起；排除指标 / 策略图表页 ✓） */
+    /**
+     * 记住买卖盘总开关（`ticket_visible_on`）+ 通知后端按格订阅 / 退订 ✓
+     *
+     * 用户 2026-11-04：工具栏「买卖盘」是**唯一**开关，一次控制布局里所有格；
+     * 打开时把每格的 `{cell, name}` 交给后端订阅该格合约的盘口 ✓
+     */
+    private _rememberTicket(visible: boolean,
+                            cells: Array<{ cell: number; name: string }>,
+                            pageId: string): void {
+        this.ticketsOn = !!visible;
+        this.send('set_setting', { key: 'ticket_visible_on', value: this.ticketsOn });
+        this.send('book_watch', {
+            page: pageId, visible: this.ticketsOn, cells: cells || [],
+        });
+    }
+
     private _nextLocalChartSeq(): number {
         const used = new Set<number>();
         for (const [id, tab] of this.tabs) {
@@ -1883,6 +2014,9 @@ export class DeskApp {
             favorites: this.favorites,
             strategyFavorites: this.strategyFavorites,
             onStrategy: (path, mode) => this.openStrategyLab(path, mode),
+            onTicketAll: (visible, cells) =>
+                this._rememberTicket(visible, cells, id),
+            ticketVisibleOf: () => this.ticketsOn,
         });
         pageRef = page;
         page.element.style.display = 'none';
@@ -1965,6 +2099,10 @@ export class DeskApp {
         if (id === HOME_TAB_ID) return;       // 首页固定，不可关闭 ✓
         const sourceTab = this.strategySources.get(id) || '';
         const page = this.pages.get(id);
+        // ★ 关页 → 后端退订这一页所有格的买卖盘（省 5 档订阅 ✓）
+        if (page instanceof ChartPage || page instanceof LocalChartPage) {
+            this.send('book_watch', { page: id, clear: true });
+        }
         if (page instanceof ChartPage) {
             page.destroy();
             this.send('close_chart', { symbol: page.symbol });
@@ -2234,7 +2372,13 @@ export class DeskApp {
                 if (!dialog) break;
                 dialog.setTheme(this.theme);
                 const kind = patch.kind === 'stocks' ? 'stocks' : 'futures';
-                if (patch.saved) dialog.setSaved(kind, patch.saved);
+                if (patch.saved) {
+                    const saved = patch.saved as Record<string, any>;
+                    if (Object.keys(saved).length) {
+                        this.loginCache[kind] = { ...saved };
+                    }
+                    dialog.setSaved(kind, saved);
+                }
                 else dialog.setState(patch);
                 break;
             }
@@ -2286,6 +2430,7 @@ export class DeskApp {
                 this.home?.setUpdate(patch as never);
                 break;
             case 'home_account':
+                this.homeAccount = (patch.account || {}) as Record<string, unknown>;
                 this.home?.setAccount(patch.account as never);
                 break;
             case 'watch': {
@@ -2648,6 +2793,8 @@ export class DeskApp {
                 const settings = (patch.settings || {}) as Record<string, unknown>;
                 this.settingsValues = settings as SettingsValues;
                 this._applySettings(settings);          // 缩放 / 主题色 / 图表项 ✓
+                // ★ 买卖盘**每次启动 / 新开图表都从「关」开始**（用户 2026-11-05 ✓）
+                this.ticketsOn = false;
                 this.settingsPage?.setValues({
                     ...this.settingsValues, theme: this.theme,
                 });
@@ -2666,8 +2813,26 @@ export class DeskApp {
                 break;
             }
             case 'book': {
-                const page = this.pages.get(`chart:${patch.symbol}`);
-                if (page instanceof ChartPage) page.setBook(patch as never);
+                // ★ 多布局：后端按「页 + 格」推（每格自己的合约盘口 ✓）
+                //   以前只会找 `chart:${symbol}` 那一页、而且页内只有一个节点
+                //   → 多布局买卖盘完全不出现 / 本地图表只有格 1 有 ✗
+                const target = patch.page
+                    ? this.pages.get(String(patch.page))
+                    : this.pages.get(`chart:${patch.symbol}`);
+                if (target instanceof ChartPage
+                    || target instanceof LocalChartPage) {
+                    target.setBook(patch as never,
+                                   typeof patch.cell === 'number'
+                                       ? patch.cell : undefined);
+                }
+                break;
+            }
+            case 'order_detail': {
+                // 改单弹窗：交给当前页的交易账户面板（预填原委托 ✓）
+                const page = this.pages.get(this.activeId) as unknown as {
+                    dock?: { openModifyOrder?: Function };
+                } | undefined;
+                page?.dock?.openModifyOrder?.(patch as never);
                 break;
             }
             case 'position': {
@@ -2725,11 +2890,118 @@ export class DeskApp {
                 }
                 break;
             }
+            case 'account_kind': {
+                // ★ 统一账户目录（快期模拟 / 富途模拟 / TqAccount）
+                //   用户 2026-11-05：**首页 / 每个图表页各自独立**
+                //   → 带 `page` 只更新那一页；不带 `page` 只更新首页 ✓
+                const kindPage = String(
+                    (patch as { page?: string }).page || '');
+                this.accountKind = patch as never;
+                if (!kindPage) {
+                    this.home?.setAccount(this._accountKindAsHome() as never);
+                    break;
+                }
+                const kindCell = (patch as { cell?: number }).cell;
+                for (const [id, page] of this.pages) {
+                    const dock = (page as unknown as {
+                        dock?: { setAccountCatalog?: Function; cell?: number };
+                        activeCellIndex?: number;
+                    }).dock;
+                    if (!dock?.setAccountCatalog) continue;
+                    if (id !== kindPage
+                        && (page as unknown as { options?: { pageId?: string } })
+                            .options?.pageId !== kindPage) continue;
+                    // ★ 多布局：别的格推来的目录**不能**改当前格的下拉框 ✓
+                    if (typeof kindCell === 'number'
+                        && (page as unknown as { activeCellIndex?: number })
+                            .activeCellIndex !== kindCell) continue;
+                    dock.setAccountCatalog(patch as never);
+                }
+                break;
+            }
             case 'account': {
                 if (!patch.symbol) this.home?.setAccount(patch as never);
-                const page = this._chartPageFor(
-                    String(patch.symbol || ''));
-                if (page instanceof ChartPage) page.setAccount(patch as never);
+                const symbol = String(patch.symbol || '');
+                // ★ 账户数据是**全局**的（切账户 / 每秒刷新）：
+                //   · 没写 symbol → 所有图表页（实时 + 本地）都刷 ✓
+                //   · 写了 symbol → 只刷那一页（`_chartPageFor` 找得到就刷）
+                //   以前只喂 `ChartPage`（本地图表页被丢掉 → 切账户后面板不动 ✗）
+                const kindOf = String((patch as { kind?: string }).kind || '');
+                const applyTo = (page: unknown): void => {
+                    // ⚠ `_chartPageFor()` 可能返回 **null**（多标签 / 本地页混开）：
+                    //   以前这里 `(target as {...}).activeCellIndex` 直接取属性
+                    //   → 每拍抛 `Cannot read properties of null (reading
+                    //   'activeCellIndex')`，整个账户面板 / 持仓表都不渲染 ✗
+                    //   （用户 2026-11-05 截图：交易账户空白 + 满屏 JS 报错）
+                    if (!page) return;
+                    const target = page as {
+                        setAccount?: Function;
+                        dock?: { setAccountCatalog?: Function };
+                        symbol?: string;
+                        cellSymbols?: string[];
+                        activeCellIndex?: number;
+                    };
+                    // ★ 兜底：股票账户数据**不能**刷到期货页（反之亦然）——
+                    //   连了富途后，期货图表页曾显示股票账户的资金 / 持仓 ✗
+                    // ★ 多布局：`cell` 只喂**当前焦点格**（别格的账户数据丢弃 ✓）
+                    const patchCell = (patch as { cell?: number }).cell;
+                    const pageCell = target.activeCellIndex;
+                    if (typeof patchCell === 'number'
+                        && typeof pageCell === 'number'
+                        && patchCell !== pageCell) return;
+                    // 多布局：按**这一格的合约**判断品种（股票格 / 期货格混排 ✓）
+                    const cellSymbols = target.cellSymbols;
+                    const single = !cellSymbols || cellSymbols.length <= 1;
+                    // ★ 单图：直接用账户补丁自己的合约（`cellSymbols` 可能还没更新）
+                    const pageSymbol = String(
+                        (single
+                            ? String((patch as { symbol?: string }).symbol || '')
+                            : (typeof patchCell === 'number'
+                                && cellSymbols?.[patchCell]))
+                        || target.symbol || '');
+                    if (kindOf === 'stock' && pageSymbol
+                        && !/^(SH|SZ|HK|US|JP|SSE|SZSE|BSE)\./i.test(pageSymbol)) {
+                        return;
+                    }
+                    if (kindOf === 'futures' && pageSymbol
+                        && /^(SH|SZ|HK|US|JP|SSE|SZSE|BSE)\./i.test(pageSymbol)) {
+                        return;
+                    }
+                    target.setAccount?.(patch as never);
+                    // ★ 每页的账户目录跟着这一页的 key（下拉框选项才不是空 ✓）
+                    const key = String((patch as { key?: string }).key || '');
+                    const items = (this.accountKind as unknown as {
+                        items?: unknown[] })?.items;
+                    if (key && items?.length) {
+                        target.dock?.setAccountCatalog?.({
+                            ...(this.accountKind as object),
+                            active: key,
+                        });
+                    }
+                };
+                // ★ 本地图表页**只吃本地模拟账户**（`type: 'local_account'`）：
+                //   真实 / 实盘账户补丁不能盖掉它的本地资金卡（用户 2026-11-05 ✓）
+                const localOk = String((patch as { type?: string }).type || '')
+                    === 'local_account';
+                const applyToLocal = (page: unknown): void => {
+                    // ★ 双向隔离（用户 2026-11-05 截图：实时图表页显示的是
+                    //   本地模拟账户的 100,000，而下拉框写着「快期模拟」✗）：
+                    //   · 本地图表页只吃 `local_account`
+                    //   · 实时图表页**只吃真实 / 实盘账户**（`local_account`
+                    //     补丁不能再盖到实时页上）
+                    if (page instanceof LocalChartPage) {
+                        if (localOk) applyTo(page);
+                        return;
+                    }
+                    if (localOk) return;
+                    applyTo(page);
+                };
+                if (!symbol) {
+                    this.pages.forEach(applyToLocal);
+                    break;
+                }
+                applyTo(this._chartPageFor(symbol));
+                applyToLocal(this._localPageFor(symbol));
                 break;
             }
             case 'log': {
@@ -3633,6 +3905,20 @@ export class DeskApp {
             (page): page is ChartPage => page instanceof ChartPage
                 && page.cellIndexOf(symbol) >= 0);
         return matched.find((page) => page === active) || matched[0] || null;
+    }
+
+    /** 按「格数据名 / 页签 symbol」找本地图表页（账户补丁路由用 ✓） */
+    private _localPageFor(symbol: string): LocalChartPage | null {
+        const text = String(symbol || '');
+        if (!text) return this._activeLocalPage();
+        const direct = this.pages.get(`local:${text}`);
+        if (direct instanceof LocalChartPage) return direct;
+        for (const page of this.pages.values()) {
+            if (!(page instanceof LocalChartPage)) continue;
+            if (page.symbol === text) return page;
+            if (page.cellNames.some((name) => name === text)) return page;
+        }
+        return null;
     }
 
     private _activeLocalPage(): LocalChartPage | null {

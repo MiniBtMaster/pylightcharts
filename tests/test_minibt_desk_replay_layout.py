@@ -625,7 +625,7 @@ def test_legend_and_ticket_source():
     for key in ('desk-legend-ohlc', 'desk-legend-row', '_renderLegendRows',
                 'toggleIndicator', 'editIndicator', 'hiddenIndicators',
                 '_bindLegendCrosshair', 'toggleOrderTicket',
-                'desk-ticket-side', 'desk-ticket-spread', 'setTicketPrice',
+                '_ensureTickets', 'setTicketVisibleAll', 'setTicketPrice',
                 "toast('回放结束",
                 "'replay_exit'"):
         assert key in chart, key
@@ -646,12 +646,14 @@ def test_param_popover_and_ticket_source():
     chart = _read(DESK_TS / 'chart-page.ts')
     assert 'openParamPopover(' in chart
     assert 'window.prompt' not in chart.split('editIndicator')[1][:1200]
-    for key in ('setTicketBook', '_renderTicket', 'desk-ticket-side',
-                'ticketAsks', 'ticketBids', 'ticketBid', 'ticketAsk'):
+    for key in ('setTicketBook', '_applyTicketBook', 'ticketBook'):
         assert key in chart, key
     # 买卖盘用买一 / 卖一（点差盘，和 minibt 实时图一致 ✓）
-    assert 'this.ticketBids[0]?.price' in chart
-    assert 'this.ticketAsks[0]?.price' in chart
+    bar = _read(DESK_TS / 'ticket-bar.ts')
+    assert "Number((data?.bids || [])[0]?.price)" in bar
+    assert "Number((data?.asks || [])[0]?.price)" in bar
+    for key in ('desk-ticket-side', 'desk-ticket-spread'):
+        assert key in bar, key
     css = _read(DESK_TS / 'desk.css')
     for key in ('.desk-ticket-side', '.desk-ticket-spread'):
         assert key in css, key
@@ -786,7 +788,9 @@ def test_picker_groups_include_tradingview(prefs_file):
     desk = _rich_desk(prefs_file)
     desk.sent.clear()
     desk.handle(protocol.encode_command({'cmd': 'indicator_picker'}))
-    patch = _patches(desk.sent)[-1]
+    # ⚠ 慢命令会在最后补一条 `[性能] 命令 … 耗时` 日志 → 取真正的分组补丁 ✓
+    patch = [row for row in _patches(desk.sent)
+             if row.get('type') == 'indicator_picker'][-1]
     sections = [section['key'] for group in patch['groups']
                 for section in group['sections']]
     for key in ('tradingview', 'talib', 'finta'):

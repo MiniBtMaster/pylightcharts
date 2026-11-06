@@ -1,9 +1,9 @@
 /**
  * AccountDock — the bottom panel of a chart tab (miniqt `sim_account_panel.py`).
  *
- *   ┌ 交易账户 × │ 运行日志 × │ ＋                 [账户 ▾] ┐
+ *   ┌ 交易账户 × │ 运行日志 × │                               ＋ ┐
  * ├ 静态权益 账户权益 持仓盈亏 … 资金使用率（11 张卡） ────┤
- * │ 持仓 | 委托 | 成交记录 | 未成委托       [平][反][全]    │
+ * │ 持仓 | 委托 | 成交记录 | 未成委托      [账户 ▾][导出 CSV] │
  * │ 表格（columns / rows，由后端预格式化）                  │
  * └──────────────────────────────────────────────────────┘
  *
@@ -11,6 +11,7 @@
  * 这里只负责排版、子表切换、账户切换、日志。
  */
 import { showMenu, type MenuItem } from './menu';
+import { openOrderModifyDialog } from './order-modify-dialog';
 
 export interface AccountField {
     key: string;
@@ -79,6 +80,13 @@ export class AccountDock {
     private readonly ticketHost: HTMLDivElement;
     private readonly actions: HTMLDivElement;
     private readonly accountSelect: HTMLSelectElement;
+
+    /** 统一账户目录（`account_kind` 补丁：快期模拟 / 富途模拟 / TqAccount）✓ */
+    private accountCatalog: {
+        items?: Array<{ key: string; label: string; available?: boolean;
+                        kind?: string }>;
+        active?: string;
+    } | null = null;
     private readonly logList: HTMLDivElement;
     /** 「代码」页签容器（`EditorPanel` 挂进来 ✓） */
     public readonly editorPane: HTMLDivElement;
@@ -92,6 +100,11 @@ export class AccountDock {
         return this.activeTab;
     }
     private readonly buttons = new Map<string, HTMLButtonElement>();
+
+    /** 所属页签 id（`chart:SHFE.ag2612`）→ 切账户**只影响本页** ✓ */
+    pageId = '';
+    /** 多布局：当前焦点格（-1 = 单图）→ 切账户**只影响这一格** ✓ */
+    cell = -1;
 
     constructor(private readonly send: (cmd: string, payload?: unknown) => void) {
         this.element = document.createElement('div');
@@ -112,14 +125,21 @@ export class AccountDock {
             this.tabs.appendChild(tab);
             this.buttons.set(key, tab);
         }
+        // ★ 切换账户下拉框：**放在交易账户页的子表行**（持仓/委托… 右侧、
+        //   「导出 CSV」左边）—— 用户 2026-11-05 要求；它影响整块面板
+        //   （卡片 + 四个子表），放在表格工具条上最省空间也最显眼 ✓
         this.accountSelect = document.createElement('select');
         this.accountSelect.className = 'desk-dock-account';
         this.accountSelect.title = '切换交易账户（快期模拟 / 实盘）';
         this.accountSelect.addEventListener('change', () => {
-            this.send('switch_account',
-                      { index: Number(this.accountSelect.value) || 0 });
+            // ★ 统一账户：发 key（kq / futu / real）+ **本页 id** ✓
+            //   用户 2026-11-05：切账户只切当前页面，别动首页 / 其它图表
+            this.send('set_account_kind', {
+                key: String(this.accountSelect.value || ''),
+                page: this.pageId,
+                ...(this.cell >= 0 ? { cell: this.cell } : {}),
+            });
         });
-        this.tabs.appendChild(this.accountSelect);
         // ★ 最右：最大化 / 恢复（初始「最大化」，点一下隐藏图表区 ✓）
         const spacer = document.createElement('span');
         spacer.style.flex = '1 1 auto';
@@ -152,6 +172,8 @@ export class AccountDock {
         this.actions.className = 'desk-dock-actions';
         this.subTabs.appendChild(this.actions);
 
+        // 账户下拉放在「导出 CSV」左边 ✓
+        this.actions.appendChild(this.accountSelect);
         const exportButton = document.createElement('button');
         exportButton.className = 'desk-dock-action';
         exportButton.textContent = '导出 CSV';
@@ -231,8 +253,10 @@ export class AccountDock {
         this.accountPane.style.display = tab === 'account' ? '' : 'none';
         this.logPane.style.display = tab === 'log' ? '' : 'none';
         this.editorPane.style.display = tab === 'code' ? '' : 'none';
-        this.accountSelect.style.display = tab === 'account' ? '' : 'none';
-        if (tab === 'account') this.send('account', {});
+        if (tab === 'account') {
+            this.send('account', {});
+            this.send('account_kind', {});   // 顺带刷新账户目录 ✓
+        }
         if (tab === 'code') this.onEditorOpen?.();
         this.onTabChange?.(tab);
     }
@@ -248,6 +272,16 @@ export class AccountDock {
     }
 
     // ------------------------------------------------------------ data
+    /** 账户目录（两个下拉框共用 ✓）→ 重绘下拉框 */
+    setAccountCatalog(catalog: {
+        items?: Array<{ key: string; label: string; available?: boolean;
+                        kind?: string }>;
+        active?: string;
+    } | null): void {
+        this.accountCatalog = catalog;
+        this._renderAccounts();
+    }
+
     setAccount(payload: AccountPayload): void {
         this.payload = payload || { type: 'account' };
         this._renderCards();
@@ -302,17 +336,40 @@ export class AccountDock {
     }
 
     private _renderAccounts(): void {
-        const labels = this.payload.labels || [];
+        // ★ 统一账户目录（快期模拟 / 富途模拟 / TqAccount）：
+        //   下拉框**常驻**；没登录的那项置灰不可选（用户 2026-11-05 ✓）
+        let catalog = this.accountCatalog?.items || [];
+        // ★ 优先用**这份账户补丁自己的 key**：目录里的 `active` 可能是
+        //   首页 / 其它页面的（用户 2026-11-05：切到富途模拟后立刻被顶回
+        //   「快期模拟」✗ —— 每秒的账户补丁带着目录里的旧 active）
+        const active = String((this.payload as unknown as { key?: string }).key
+            || this.accountCatalog?.active || '');
+        // ★ 目录还没到（或为空）→ 退回账户补丁里的 labels，**别把下拉清空** ✗
+        if (!catalog.length) {
+            catalog = (this.payload.labels || []).map((label, index) => ({
+                key: String(index), label, available: true,
+            }));
+        }
         this.accountSelect.textContent = '';
-        labels.forEach((label, index) => {
+        for (const item of catalog) {
             const option = document.createElement('option');
-            option.value = String(index);
-            option.textContent = label;
+            option.value = String(item.key || '');
+            option.textContent = String(item.label || '');
+            option.disabled = item.available === false;
+            if (item.available === false) {
+                option.textContent += '（未登录）';
+            }
             this.accountSelect.appendChild(option);
-        });
-        this.accountSelect.selectedIndex = Number(this.payload.index || 0);
-        // 只有一个账户就淡化（miniqt 里是隐藏 ✓）
-        this.accountSelect.style.display = labels.length > 1 ? '' : 'none';
+        }
+        if (active) {
+            const known = Array.prototype.slice.call(this.accountSelect.options)
+                .some((option: HTMLOptionElement) => option.value === active);
+            if (known) this.accountSelect.value = active;
+        }
+        // 常驻显示（有登录的才可选；全都没登录时整体置灰 ✓）
+        this.accountSelect.style.display = '';
+        const anyOn = catalog.some((item) => item.available !== false);
+        this.accountSelect.disabled = !anyOn;
     }
 
     private _renderTable(): void {
@@ -390,20 +447,52 @@ export class AccountDock {
         const volume = Number(raw.volume) || 0;
         const items: MenuItem[] = [];
         if (table === 'positions') {
+            // ★ 实盘：平 / 反 / 全 都要二次确认（和交易面板一致 ✓）
+            const real = (this.payload as unknown as { real?: boolean }).real
+                === true;
+            const guard = (text: string): boolean => {
+                if (!real) return true;
+                return window.confirm(`【实盘】${text}
+
+确认执行？`);
+            };
+            // ★ 锁仓时同一合约有**多 / 空两行** → 必须带 `side`，
+            //   否则后端不知道平哪一边（用户实测 2026-11-05 ✗）
+            const rowSide = String(raw.side || '');
+            const sideText = rowSide ? `${rowSide}单` : '该合约';
+            // ★ 本面板当前账户名（每个图表页 / 每格各自独立 ✓）
+            const label = String(
+                (this.payload as unknown as { label?: string }).label || '');
+            const ownSymbol = String(
+                (this.payload as unknown as { symbol?: string }).symbol || '');
             items.push({
-                label: `平（市价平 ${symbol || '该合约'}）`,
-                run: () => this.send('position_action', {
-                    action: 'close', symbol, volume,
-                }),
+                label: `平（对手价平 ${sideText} ${volume || ''} 手）`,
+                run: () => {
+                    if (!guard(`平 ${sideText} ${volume} 手`)) return;
+                    this.send('position_action', {
+                        action: 'close', symbol, volume, side: rowSide,
+                    });
+                },
             }, {
-                label: `反（市价平 ${volume || ''} 手后反向开）`,
-                run: () => this.send('position_action', {
-                    action: 'reverse', symbol, volume,
-                }),
+                label: `反（平 ${sideText} ${volume || ''} 手后反向开）`,
+                run: () => {
+                    if (!guard(`反手 ${sideText} ${volume} 手`)) return;
+                    this.send('position_action', {
+                        action: 'reverse', symbol, volume, side: rowSide,
+                    });
+                },
             }, {
-                label: '全（市价平掉全部持仓）',
+                label: `全（平掉全部多空持仓 · 本账户所有合约`
+                    + `${label ? ` · ${label}` : ''}）`,
                 separator: true,
-                run: () => this.send('position_action', { action: 'all' }),
+                run: () => {
+                    if (!guard(`平掉「${label || '当前账户'}」全部持仓`)) return;
+                    // ★ 必须带 `symbol`：后端据此选**这一页的账户**
+                    //   （以前不带 → 用首页账户 → 期货页提示"富途模拟" ✗）
+                    this.send('position_action', {
+                        action: 'all', symbol: ownSymbol || symbol, page: this.pageId,
+                    });
+                },
             });
         } else {
             const alive = raw.alive !== false;
@@ -424,6 +513,35 @@ export class AccountDock {
         }
         void index;
         showMenu(Math.round(event.clientX), Math.round(event.clientY), items);
+    }
+
+    /**
+     * 打开「修改委托单」弹窗（后端 `order_detail` 补丁 → 这里 ✓）
+     *
+     * 预填合约 / 买卖开平 / 手数 / 价格；提交后发 `order_modify`
+     * （= 撤旧单 + 按新价新量重下 ✓）
+     */
+    openModifyOrder(detail: Record<string, unknown>): void {
+        const symbol = String(detail.symbol || '');
+        const orderId = String(detail.order_id || '');
+        if (!symbol || !orderId) return;
+        const direction = String(detail.direction || '').toUpperCase();
+        const offset = String(detail.offset || '').toUpperCase();
+        const sideLabel = (direction === 'BUY' ? '买' : '卖')
+            + (offset === 'OPEN' ? '开' : '平');
+        openOrderModifyDialog({
+            symbol,
+            sideLabel,
+            volume: Number(detail.volume) || 1,
+            price: Number(detail.price) || null,
+            decimals: Number(detail.decimals) || 2,
+            onSave: (volume, price) => {
+                this.send('order_modify', {
+                    symbol, order_id: orderId, volume, price, direction,
+                    offset,
+                });
+            },
+        });
     }
 
     /**

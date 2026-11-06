@@ -56,14 +56,18 @@ def test_close_all_uses_full_symbols(tmp_path, monkeypatch):
     """全平必须拿 `SHFE.ag2612` 去调仓（裸 `ag2612` 会被天勤拒掉 ✗）"""
     desk = _desk(tmp_path, monkeypatch)
     trader = desk.trading_view()
-    rows = [_PosRow('ag2612', 'SHFE'), _PosRow('a2701', 'DCE', short=2)]
+    rows = [_PosRow('ag2612', 'SHFE'),
+            _PosRow('a2701', 'DCE', long=0, short=2)]
     trader._positions = lambda: rows                      # 假持仓 ✓
     calls = []
-    trader._set_target = lambda symbol, target: (
-        calls.append((symbol, target)) or f'{symbol} → {target}')
+    # ★ 2026-11-05：全平改成**对手价限价单**（`insert`），不再走 TargetPosTask
+    trader.insert = lambda symbol, side, offset, volume, price=None: (
+        calls.append((symbol, side, offset, int(volume)))
+        or f'{symbol} → {offset}')
     text = trader._close_all()
     assert '全部平仓' in text
-    assert calls == [('SHFE.ag2612', 0), ('DCE.a2701', 0)]
+    assert calls == [('SHFE.ag2612', 'sell', 'close', 1),
+                     ('DCE.a2701', 'buy', 'close', 2)]
 
 
 def test_positions_table_shows_full_symbols(tmp_path, monkeypatch):

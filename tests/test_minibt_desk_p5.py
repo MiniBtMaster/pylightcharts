@@ -297,11 +297,15 @@ def test_stock_trading_uses_local_sim(tmp_path):
     assert order['direction'] == 'BUY' and order['offset'] == 'OPEN'
     assert order['volume'] == 100 and order['limit_price'] == 10.5
 
+    # ★ 2026-11-05：平仓 / 全平改成**限价单（对手价）**，不再走 TargetPosTask
     trader.action('close', 'SSE.600000')
-    assert desk.stocks.api.targets[-1] == ('SSE.600000', 0)
+    order = desk.stocks.api.last_order
+    assert order['symbol'] == 'SSE.600000'
+    assert order['offset'] == 'CLOSE'
 
     trader.action('all')                       # 全平：符号要统一成 SSE. ✓
-    assert desk.stocks.api.targets[-1][0] == 'SSE.600000'
+    assert desk.stocks.api.last_order['symbol'] == 'SSE.600000'
+    assert desk.stocks.api.last_order['offset'] == 'CLOSE'
 
 
 def test_stock_indicators_compute(tmp_path):
@@ -330,8 +334,12 @@ def test_add_stocks_uses_desk_sim_account(monkeypatch):
     desk = Desk(offline=True)
     desk.add_stocks(host='127.0.0.1', port=11111)
     assert captured['sim_account'] == 'desk'
-    assert captured['trade'] is False
+    # ★ 默认（模拟盘）会连**富途官方模拟账户** → trade 默认 True（2026-11-06）
+    assert captured['trade'] is True
     assert desk.stocks is not None and desk.stocks.kind == 'stocks'
+    # 显式 `trade=False` 仍可用（只行情 + 本地记账 ✓）
+    desk.add_stocks(host='127.0.0.1', port=11111, trade=False)
+    assert captured['trade'] is False
 
 
 def test_p5_assets_built():

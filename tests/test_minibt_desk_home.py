@@ -191,9 +191,11 @@ def test_offline_start_stays_on_local_chart():
 
 
 def test_account_summary_has_label_for_home():
-    # AccountView.summary 需要给首页一个可读账户名 ✓
+    # AccountView.summary 需要给首页一个可读账户名（按页 key 取 ✓）
     source = _read(ROOT / 'minibt' / 'desk' / 'accounts.py')
-    assert "'label': labels[self.index]" in source
+    assert "'label': labels[index] if labels else ''," in source
+    assert 'index = (self.index_for_key(payload_key, symbol) if payload_key'         in source
+    assert "'key': payload_key," in source
 
 
 def test_no_service_flush_pushes_offline_skeleton_only():

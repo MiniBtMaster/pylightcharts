@@ -604,15 +604,61 @@ html, body {
     color: var(--desk-accent);
 }
 
+/* 切换交易账户（放在「持仓/委托…」子表行、导出 CSV 左边 ✓） */
+/* ★ 价格框的上下按钮（空值 = 买一 / 卖一，否则 ±最小变动价位 ✓） */
+.desk-local-ticket-price-box {
+    display: flex;
+    align-items: stretch;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.desk-local-ticket-price-box .desk-local-ticket-price {
+    flex: 1 1 auto;
+    min-width: 0;
+    -moz-appearance: textfield;
+}
+.desk-local-ticket-price::-webkit-outer-spin-button,
+.desk-local-ticket-price::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+.desk-local-ticket-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 0 0 auto;
+}
+.desk-local-ticket-step {
+    width: 18px;
+    flex: 1 1 50%;
+    padding: 0;
+    font-size: 9px;
+    line-height: 1;
+    border: 1px solid var(--desk-border);
+    border-radius: 3px;
+    background: var(--desk-panel);
+    color: var(--desk-text);
+    cursor: pointer;
+}
+.desk-local-ticket-step:hover {
+    background: var(--desk-hover, rgba(255, 255, 255, .08));
+}
 .desk-dock-account {
-    margin-left: auto;
+    margin-left: 0;
     height: 20px;
-    max-width: 200px;
+    max-width: 170px;
+    min-width: 84px;
     background: var(--desk-bg);
     border: 1px solid var(--desk-border);
     border-radius: 3px;
     color: var(--desk-text);
     font-size: 11px;
+    text-overflow: ellipsis;
+}
+/* ★ 本地图表：账户下拉框隐藏（只用本地模拟账户 ✓ 用户 2026-11-05） */
+.desk-dock.local-only .desk-dock-account {
+    display: none;
 }
 
 .desk-dock-pane { flex: 1 1 auto; min-height: 0; display: flex;
@@ -646,6 +692,7 @@ html, body {
     display: flex;
     align-items: center;
     gap: 4px;
+    flex-wrap: nowrap;      /* 4 页签 + 账户下拉 + 导出：不换行 ✓ */
     padding: 4px 8px 0;
 }
 
@@ -705,7 +752,8 @@ html, body {
 }
 
 .desk-dock-ticket {
-    flex: 0 0 196px;
+    /* ★ 交易面板加宽：快期式四按钮一行要放得下（196 → 320px）✓ */
+    flex: 0 0 320px;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -769,11 +817,84 @@ html, body {
 
 .desk-local-ticket-row > input:focus { border-color: var(--desk-accent); }
 
+/* 通用小模态（改单窗口等 ✓ 2026-11-05） */
+.desk-modal-overlay {
+    position: fixed; inset: 0; z-index: 90;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, .45);
+}
+
+.desk-modal {
+    min-width: 320px;
+    max-width: 460px;
+    padding: 14px 16px 12px;
+    border: 1px solid var(--desk-border);
+    border-radius: 8px;
+    background: var(--desk-panel);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, .45);
+    color: var(--desk-text);
+    font-size: 12px;
+}
+
+.desk-modal-title {
+    font-size: 13px; font-weight: 600; margin-bottom: 10px;
+}
+
+.desk-modify .desk-local-ticket-row {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+}
+
+.desk-modify .desk-local-ticket-row > .k {
+    flex: 0 0 42px; color: var(--desk-muted);
+}
+
+.desk-modify input {
+    flex: 1 1 auto; min-width: 0; height: 26px;
+    padding: 0 8px;
+    border: 1px solid var(--desk-border);
+    border-radius: 4px;
+    background: var(--desk-bg);
+    color: var(--desk-text);
+    font-size: 12px;
+}
+
+.desk-modify input.bad { border-color: #ef5350; }
+
+.desk-modify-value {
+    flex: 1 1 auto; min-width: 0; line-height: 26px;
+    color: var(--desk-text);
+    font-weight: 600;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.desk-modal-foot {
+    display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px;
+}
+
+.desk-modal-foot > button { min-width: 64px; height: 26px; }
+
+.desk-modal-tip {
+    margin-top: 8px; color: var(--desk-muted); font-size: 11px;
+}
+
 .desk-local-ticket-buttons {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
     gap: 5px;
 }
+
+/* ★ 快期式四按钮：一行四个（加多/买平/平多X/锁仓 …）✓ 2026-11-05 */
+.desk-local-ticket-buttons.desk-local-ticket-four {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+}
+
+.desk-local-ticket-four > button {
+    font-size: 11.5px;
+    padding: 0 2px;
+    white-space: nowrap;
+}
+
 
 .desk-local-ticket-buttons > button {
     height: 26px;
@@ -1451,6 +1572,16 @@ body.theme-dark .desk-quote-grid-host .pylc-dg-body::-webkit-scrollbar-thumb {
 }
 
 /* 图例里（和 minibt 实时图一致：OHLC 行下面、指标行上面 ✓） */
+/* 买卖盘：每格一条，显隐由**工具栏「买卖盘」**统一控制 ✓（无逐格 👁） */
+.desk-ticket-body { display: flex; }
+
+/* 隐藏 = 整块从图上消失（不是"变暗" ✗） */
+.desk-ticket.off .desk-ticket-body { display: none; }
+.desk-ticket.off .desk-ticket-side {
+    pointer-events: none;
+    cursor: default;
+}
+
 .desk-ticket.in-legend {
     position: relative;
     left: auto;
@@ -1460,6 +1591,12 @@ body.theme-dark .desk-quote-grid-host .pylc-dg-body::-webkit-scrollbar-thumb {
 }
 
 /* 持仓线标签：图内左侧小色块（不再画在价格轴上 ✓） */
+/* 平仓线标签（平仓委托）：橙色，和挂单线同一套排版 ✓ */
+.desk-order-badge.close {
+    border-color: #ffb74d;
+    color: #ffb74d;
+}
+
 .desk-pos-badge {
     position: absolute;
     z-index: 30;
@@ -3038,16 +3175,20 @@ body.theme-light .desk-tab-new {
 
 /* 「回到顶部」：页面滚过筛选行后出现在右下角（主题色圆 + 白色 ↑ ✓） */
 .desk-tv-top {
-    position: fixed; z-index: 35;
-    width: 36px; height: 36px; border-radius: 50%;
+    /* 固定在视口右下角：缩放（`transform: scale`）时 `fixed` 的定位基准是
+       被缩放的根节点，用 right/bottom 才和视口对齐（用 JS 算 left/top 会
+       被缩放两次 → 圆钮被切掉 ✗） */
+    position: fixed; right: 22px; bottom: 22px; z-index: 35;
+    width: 40px; height: 40px; border-radius: 50%;
     display: none; align-items: center; justify-content: center;
-    border: 0; padding: 0 0 2px; cursor: pointer;
-    font-size: 16px; line-height: 1; color: #fff;
+    border: 0; padding: 0; cursor: pointer;
+    line-height: 1; color: #fff;
     background: var(--desk-accent);
     box-shadow: 0 4px 14px rgba(0, 0, 0, .32);
     transition: transform .12s ease, opacity .12s ease;
     opacity: .92;
 }
+.desk-tv-top svg { display: block; pointer-events: none; }
 .desk-tv-top.on { display: flex; }
 .desk-tv-top:hover { transform: translateY(-2px); opacity: 1; }
 

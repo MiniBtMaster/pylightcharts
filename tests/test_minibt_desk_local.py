@@ -211,7 +211,7 @@ def test_local_strategy_signals_drive_local_sim_and_position_line():
 
 def test_local_trade_ticket_and_strategy_auto_source():
     page = _read(JSLIB / 'local-chart-page.ts')
-    assert "onOrder: (side, close) => this._localOrder(side, close)" in page
+    assert "onOrder: (order) => this._localOrder(order)" in page
     assert 'this._on_local_strategy_trade' not in page
     assert 'local_strategy_trade' in page
     assert 'private _syncStrategyTrades()' in page

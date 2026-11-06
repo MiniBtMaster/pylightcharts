@@ -49,12 +49,16 @@ export interface HomeEvent {
 }
 
 export interface HomeAccountChoice {
+    /** 统一账户 key：`kq` / `futu` / `real` ✓ */
+    key?: string;
     kind: 'futures' | 'stocks';
     label: string;
     available: boolean;
 }
 
 export interface HomeAccount {
+    /** 当前账户 key（`kq` / `futu` / `real`）✓ */
+    key?: string;
     kind?: string;
     label?: string;
     labels?: string[];
@@ -475,7 +479,21 @@ export class HomePage {
     }
 
     setAccount(account: HomeAccount): void {
-        this.account = account;
+        // ★ 账户摘要补丁（每秒 / 切账户时都会来）**不带 `choices`**：
+        //   以前直接整体替换 → 首页「切账户」下拉框变空、点开没有选项 ✗
+        //   （用户 2026-11-05：在交易账户页切过账户后，首页就切不了了）
+        const merged: HomeAccount = {
+            ...(this.account || {}),
+            ...(account || {}),
+        } as HomeAccount;
+        if (!(account as { choices?: unknown })?.choices) {
+            merged.choices = this.account?.choices;
+        }
+        if (!(account as { key?: unknown })?.key) {
+            const oldKey = (this.account as unknown as { key?: string })?.key;
+            if (oldKey) (merged as unknown as { key?: string }).key = oldKey;
+        }
+        this.account = merged;
         const balance = num(account.values?.balance);
         if (balance !== null) {
             const history = this.equity;
@@ -662,13 +680,18 @@ export class HomePage {
             const accountButton = target.closest<HTMLElement>(
                 '[data-home-account]');
             if (accountButton) {
+                // ★ 统一账户：快期模拟 / 富途模拟 / TqAccount（没登录的置灰 ✓）
                 const choices = this.account?.choices || [];
+                const active = String(
+                    (this.account as unknown as { key?: string })?.key
+                    || this.account?.kind || '');
                 showMenuBelow(accountButton, choices.map((choice) => ({
-                    label: `${choice.label}${choice.kind === this.account?.kind
-                        ? '  ✓' : ''}`,
-                    disabled: !choice.available,
+                    label: `${choice.label}`
+                        + `${choice.key === active ? '  ✓' : ''}`
+                        + `${choice.available === false ? '（未登录）' : ''}`,
+                    disabled: choice.available === false,
                     run: () => this.options.onCommand(
-                        'home_account_kind', { kind: choice.kind }),
+                        'home_account_kind', { key: choice.key }),
                 })));
                 return;
             }

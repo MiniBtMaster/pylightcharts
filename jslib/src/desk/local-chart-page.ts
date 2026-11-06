@@ -34,7 +34,7 @@ import { AccountDock, type AccountPayload } from './account-dock';
 // 「编辑器」页签（本地图表也能写个人指标 / 策略 ✓）
 import { CodeEditor } from './code-editor';
 import { EditorPanel } from './editor-panel';
-import { buildReplayTicket, type ReplayTicket }
+import { buildReplayTicket, type ReplayTicket, type TicketOrder }
     from './replay-ticket';
 import { AlertDialog } from '../panels/alert-dialog';
 import { IndicatorPicker } from '../panels/indicator-picker';
@@ -46,6 +46,7 @@ import {
 } from 'lightweight-charts';
 import { LayoutManager, LayoutParamsDialog,
     SaveLayoutDialog } from './layout-dialogs';
+import { TicketBar } from './ticket-bar';
 import { REPLAY_SEEKS, REPLAY_SPEEDS, Replay, type ReplayBar } from './replay';
 import { openParamPopover } from './param-popover';
 import { openIndicatorSettings,
@@ -107,6 +108,16 @@ export interface ChartPageOptions {
     strategyFavorites?: Array<Record<string, unknown>>;
     /** 主题（副图背景色要用 ✓） */
     theme?: 'light' | 'dark';
+    /**
+     * 工具栏「买卖盘」→ DeskApp 持久化 + 后端按格订阅 / 退订盘口 ✓
+     *
+     * ⚠ 2026-11-04 起**只有工具栏统一开关**（去掉每格行尾 👁）；
+     * `cells` 里每项 `{cell, name}`（本地页 `name` = CSV 名 ✓）
+     */
+    onTicketAll?: (visible: boolean,
+                   cells: Array<{ cell: number; name: string }>) => void;
+    /** 全局买卖盘开关（打开页面时恢复 ✓） */
+    ticketVisibleOf?: () => boolean;
     /** 编辑器「策略回测 / 参数优化」→ App 打开独立策略 Tab ✓ */
     onStrategy?: (path: string, mode: 'backtest' | 'optimize') => void;
     /**
@@ -278,25 +289,19 @@ export class LocalChartPage {
     private readonly cellLegendTitles: HTMLDivElement[] = [];
     private readonly cellItems: IndicatorLine[][] = [];
     private readonly cellHidden: Array<Set<string>> = [];
-    /** 图上买卖盘 */
-    private orderTicket: HTMLDivElement | null = null;
-    private orderTicketVisible = false;
+    /**
+     * 图上买卖盘 —— **每格一条**（以前整页一个节点只挂格 1 ✗，用户实测 2026-11-03）
+     */
+    private readonly tickets: Array<TicketBar | null> = [];
+    private readonly ticketVisible: boolean[] = [];
+    /** 页面级「买卖盘」总开关（工具栏按钮只切它 ✓） */
+    private ticketsOn = false;
+    private ticketBook: {
+        bids: Array<{ price?: number | null }>;
+        asks: Array<{ price?: number | null }>;
+    } | null = null;
     private orderQty = 1;
-    private orderPrice: number | null = null;
-    private ticketAsks: Array<{ price?: number | null }> = [];
-    private ticketBids: Array<{ price?: number | null }> = [];
-    /** 买一 / 卖一 / 净仓（正=多、负=空）✓ */
-    private ticketBid: number | null = null;
-    private ticketAsk: number | null = null;
-    private ticketNet = 0;
     private ticketDecimals = 2;
-    private ticketBuy: {
-        node: HTMLButtonElement; price: HTMLSpanElement; label: HTMLSpanElement;
-    } | null = null;
-    private ticketSell: {
-        node: HTMLButtonElement; price: HTMLSpanElement; label: HTMLSpanElement;
-    } | null = null;
-    private ticketSpread: HTMLDivElement | null = null;
     /** 指标选择器的二级筛选（后端偏好 `indicator_overlay_filter` ✓） */
     private indicatorFilter: 'all' | 'main' | 'sub' = 'all';
     /** 导出历史（后端 `exports` 补丁；看盘页也能打开 ✓） */
@@ -546,7 +551,7 @@ export class LocalChartPage {
         const linkButton = this._toolButton('联动', () => this.toggleLink(),
                                             '多图联动（时间轴 / 十字线同步）');
         const ticketButton = this._toolButton('买卖盘', () => this.toggleOrderTicket(),
-                                              '图上买卖盘（买入 / 点差 / 卖出，有仓→平仓）');
+                                              '买卖盘：显示 / 隐藏布局里所有图表的买卖盘');
         this.ticketButton = ticketButton;
         const shotButton = this._toolButton('', () => this.screenshot(),
                                             '截图（PNG）');
@@ -633,6 +638,9 @@ export class LocalChartPage {
 
         this.dock = new AccountDock((cmd, payload) => this.options.onCommand?.(
             cmd, payload));
+        // ★ 本地图表**只接本地模拟账户**（用户 2026-11-05 ✓）：
+        //   真实 / 实盘账户与它无关 → 交易账户页的「切账户」下拉框直接隐藏
+        this.dock.element.classList.add('local-only');
         // ★ 编辑器页签 + 最大化（和看盘窗口同一套 ✓）
         this.dock.onEditorOpen = () => {
             this._ensureEditor().show();
@@ -642,6 +650,7 @@ export class LocalChartPage {
             if (tab === 'code') this._ensureEditor().show();
             else this.editor?.hide();
         };
+        this.dock.pageId = this.options.pageId || '';
         this.dock.onToggleMaximize = () => this.toggleDockMaximize();
         // 账户四张表的「导出 CSV」→ 走后端落盘（Qt 里能看见路径 ✓）
         this.dock.onExport = (filename, text) => {
@@ -959,7 +968,8 @@ export class LocalChartPage {
                     .chart.applyOptions(chartTheme);
             } catch { /* ignore */ }
         }
-        if (this.orderTicketVisible) this._ensureOrderTicket();
+        this._restoreTickets();
+        this._ensureTickets();
         this._refreshDrawings();
     }
 
@@ -2365,6 +2375,8 @@ export class LocalChartPage {
         // ★ 价格步进 = 最小变动价位（按小数位推：1 位 → 0.1 ✓）
         this.localTicket?.setStep(this.localPriceTick
             || Math.pow(10, -this.localDecimals));
+        // 本地模拟没有真实盘口 → 清掉买一 / 卖一（空值时按现价 ±1 跳 ✓）
+        this.localTicket?.setBookPrices(null, null);
         this._syncLocalTicketInfo();
     }
 
@@ -2392,63 +2404,66 @@ export class LocalChartPage {
                     ? '已锁定：只在当前标的交易'
                     : '未锁定：可在本地数据里切换标的');
             },
-            onOrder: (side, close) => this._localOrder(side, close),
+            onOrder: (order) => this._localOrder(order),
             onAction: (action) => this.options.onCommand?.(
                 'local_account_action', {
                     action, symbol: this.tradeSymbol || this.localName,
                 }),
-            info: '点二级报价档位可填价格 · 平仓=按价格；市价平仓=市价',
+            info: '价格留空=市价；填了价格=限价挂单（等价格触发）',
         });
         this.localTicket = ticket;
         const inputs = ticket.element.querySelectorAll('input[type=number]');
         this.localPriceInput = (inputs[0] || null) as HTMLInputElement | null;
         this.localQtyInput = (inputs[1] || null) as HTMLInputElement | null;
+        void this.localQtyInput;      // 目前只在调试时用（保留引用 ✓）
         this.localInfo = ticket.element.querySelector(
             '.desk-local-ticket-info') as HTMLDivElement | null;
         this.dock.setTicket(ticket.element);
     }
 
-    private _localOrder(side: string, close: boolean): void {
+    /**
+     * 本地图表的价格同步（最新价 → 价格框 placeholder / 买卖盘 / 净仓 ✓）
+     *
+     * 2026-11-05：价格框不再被自动填满（空 = 对手价，填了 = 限价挂单）✓
+     */
+    private _syncLocalPrice(value: number): void {
+        const price = Number(value);
+        if (Number.isFinite(price) && price > 0) this.localPrice = price;
+        if (this.localPriceInput
+            && document.activeElement !== this.localPriceInput) {
+            this.localPriceInput.placeholder = this.localPrice
+                ? this.localPrice.toFixed(this.localDecimals) : '';
+        }
+        this.ticketDecimals = this.localDecimals;
+        // ★ 图上买卖盘：回放时买一/卖一都指向最新 K 线收盘价 ✓
+        if (this.localPrice) {
+            this.setTicketBook({ bids: [{ price: this.localPrice }],
+                                 asks: [{ price: this.localPrice }] });
+        }
+        this._ensureTickets();
+        for (let index = 0; index < this.tickets.length; index += 1) {
+            this.tickets[index]?.setNet(this.localNet);
+        }
+        this.localTicket?.setNet(this.localNet);
+        this._syncLocalTicketInfo();
+    }
+
+    private _localOrder(order: TicketOrder): void {
         const symbol = this.tradeSymbol || this.localName;
         if (!symbol) {
             this.toast('请先选择本地数据');
             return;
         }
-        const price = this.localTicket?.priceValue()
-            || Number(this.localPriceInput?.value) || this.localPrice;
-        // ★ 手数：共用控件兜底 1（以前读到 null → 0 → 误报「手数要大于 0」✗）
-        const qty = this.localTicket?.qtyValue()
-            || Number(this.localQtyInput?.value) || 1;
-        if (!(price > 0) || !(qty > 0)) {
-            this.toast('价格 / 手数要大于 0');
-            return;
-        }
-        if (close && this.localNet === 0) {
-            this.toast('当前没有持仓可平');
-            return;
-        }
         this.options.onCommand?.('local_order', {
-            symbol, side, qty, price, close,
+            symbol,
+            side: order.side,
+            offset: order.offset,
+            volume: order.volume,
+            qty: order.volume,
+            // 价格留空 = 对手价（后端解析）✓
+            price: this.localTicket?.priceValue() || 0,
+            label: order.label,
         });
-    }
-
-    private _syncLocalPrice(price: number): void {
-        const value = Number(price);
-        if (Number.isFinite(value) && value > 0) {
-            this.localPrice = value;
-        }
-        if (this.localPriceInput
-            && document.activeElement !== this.localPriceInput) {
-            this.localPriceInput.value = this.localPrice
-                ? this.localPrice.toFixed(this.localDecimals) : '';
-        }
-        // ★ 图上买卖盘：回放时买一/卖一都指向最新 K 线收盘价 ✓
-        this.ticketBid = this.localPrice || null;
-        this.ticketAsk = this.localPrice || null;
-        this.ticketDecimals = this.localDecimals;
-        this.ticketNet = this.localNet;
-        this._renderTicket();
-        this._syncLocalTicketInfo();
     }
 
     private _syncLocalTicketInfo(): void {
@@ -3365,14 +3380,82 @@ export class LocalChartPage {
         this._drawings().clear(this._drawingKey());
     }
 
-    /** 工具栏「买卖盘」→ 图上浮动买卖盘 ✓ */
+    /**
+     * 工具栏「买卖盘」→ **全局开关**（所有格一起开 / 关）✓
+     *
+     * 每格自己的显隐在该格图例的 👁 上（用户 2026-11-03 确认的设计）。
+     * 以前是整页一个布尔 + 只挂格 1 的节点 → 「其它格调不出买卖盘」✗
+     */
     toggleOrderTicket(visible?: boolean): boolean {
-        this.orderTicketVisible = visible === undefined
-            ? !this.orderTicketVisible : !!visible;
-        this.ticketButton?.classList.toggle('on', this.orderTicketVisible);
-        if (this.orderTicketVisible) this._ensureOrderTicket();
-        else this.orderTicket?.classList.remove('on');
-        return this.orderTicketVisible;
+        const next = visible === undefined ? !this.ticketsOn : !!visible;
+        this.setTicketVisibleAll(next, true);
+        return next;
+    }
+
+    /**
+     * 一键全开 / 全关（**工具栏「买卖盘」是唯一开关** ✓）
+     *
+     * 用户 2026-11-04：去掉每格行尾的 👁，布局里所有格统一由工具栏控制
+     * （"不用搞那么复杂"）。`notify` 时顺便让后端按格订阅 / 退订盘口 ✓
+     */
+    setTicketVisibleAll(visible: boolean, notify = false): void {
+        this.ticketsOn = !!visible;
+        this._ensureTickets();
+        for (let index = 0; index < this.cells.length; index += 1) {
+            this.ticketVisible[index] = this.ticketsOn;
+            this.tickets[index]?.setVisible(this.ticketsOn);
+            if (this.ticketsOn) this._applyTicketBook(index);
+        }
+        this.ticketButton?.classList.toggle('on', this.ticketsOn);
+        if (notify) {
+            this.options.onTicketAll?.(
+                this.ticketsOn,
+                this.cellSymbols.map((_symbol, index) => ({
+                    cell: index, name: this._ticketName(index),
+                })),
+            );
+        }
+    }
+
+    /**
+     * 初始状态：买卖盘**一律关闭** ✓
+     *
+     * 用户 2026-11-05：多布局出图时买卖盘是打开的（上次的开关被恢复了 ✗）
+     * → 现在每打开一页图表（含多布局的每一格）都从「关」开始，
+     *   要看得显式点工具栏「买卖盘」。
+     */
+    private _restoreTickets(): void {
+        this.ticketsOn = false;
+        this._ensureTickets();
+        for (let index = 0; index < this.cells.length; index += 1) {
+            this.ticketVisible[index] = this.ticketsOn;
+            this.tickets[index]?.setVisible(this.ticketsOn);
+        }
+        this.ticketButton?.classList.toggle('on', false);
+    }
+
+    /**
+     * 这个盘口补丁是不是**别的格**的（不是当前焦点合约）✓
+     *
+     * 多布局点格 2 后，若还有格 1 的 `book` 补丁进来，会把右侧面板的
+     * 合约 / 五档又改回格 1（用户实测 2026-11-04 ✗）→ 直接丢掉。
+     */
+    private _isStaleBook(data: { symbol?: string }): boolean {
+        const symbol = String((data as { symbol?: string })?.symbol || '');
+        if (!symbol) return false;                 // 没写合约 = 本地 / 回放 ✓
+        const focus = String(this.tradeSymbol || this.options.symbol || '');
+        return !!focus && symbol !== focus;
+    }
+
+    /** 买卖盘落盘的键：本地 CSV 名（`book_watch` 按格订阅用 ✓） */
+    private _ticketName(cell = 0): string {
+        return String(this.cellNames[cell]
+            || this.options.symbol || '');
+    }
+
+    private _cellIndex(cell: number): number {
+        const max = Math.max(0, this.cells.length - 1);
+        return Math.max(0, Math.min(Number(cell) || 0, max));
     }
 
     /**
@@ -3380,140 +3463,84 @@ export class LocalChartPage {
      *
      * 形态和 **minibt 实时图**一致：`买入 | 点差 | 卖出`；
      * 有仓位时变成 `买入 | 点差 | 平仓`（多仓）或 `平仓 | 点差 | 卖出`（空仓）。
+     * `cell` 指定时只刷那一格 ✓
      */
     setTicketBook(data: {
         bids?: Array<{ price?: number | null }>;
         asks?: Array<{ price?: number | null }>;
-    }): void {
-        this.ticketAsks = (data.asks || []).slice(0, 5);
-        this.ticketBids = (data.bids || []).slice(0, 5);
-        const bid = Number(this.ticketBids[0]?.price);
-        const ask = Number(this.ticketAsks[0]?.price);
-        if (Number.isFinite(bid)) this.ticketBid = bid;
-        if (Number.isFinite(ask)) this.ticketAsk = ask;
-        this._renderTicket();
+        symbol?: string;
+    }, cell?: number): void {
+        this.ticketBook = {
+            bids: (data?.bids || []).slice(0, 5),
+            asks: (data?.asks || []).slice(0, 5),
+        };
+        if (typeof cell === 'number' && Number.isFinite(cell)) {
+            this._applyTicketBook(this._cellIndex(cell));
+            return;
+        }
+        this._ensureTickets();
+        for (let index = 0; index < this.cells.length; index += 1) {
+            this._applyTicketBook(index);
+        }
     }
 
-    /** 外部（二级报价 / 5 档点击）同步价格 → 填进「价格」输入框 ✓ */
+    private _applyTicketBook(cell: number): void {
+        const bar = this.tickets[cell];
+        if (!bar || !this.ticketBook) return;
+        bar.setDecimals(this.ticketDecimals);
+        bar.setBook(this.ticketBook);
+    }
+
+    /** 外部（回放 / 二级报价）同步价格 → 填进「价格」输入框 ✓ */
     setTicketPrice(price: number | null, force = false): void {
         if (price === null || !Number.isFinite(Number(price))) return;
-        this.orderPrice = Number(price);
-        const input = this.orderTicket?.querySelector<HTMLInputElement>(
-            '.desk-ticket-price');
-        if (input) input.value = this.orderPrice.toFixed(this.ticketDecimals);
-        // ★ 点档位 → 填「本地模拟交易」面板的价格（强制覆盖手输 ✓）
-        this.localTicket?.setPriceForce(this.orderPrice);
+        void price;
         void force;
     }
 
-    /** 点差 = |卖一 − 买一| ✓ */
-    private _spread(): number | null {
-        if (this.ticketBid === null || this.ticketAsk === null) return null;
-        return Math.abs(this.ticketAsk - this.ticketBid);
-    }
-
-    private _ensureOrderTicket(): void {
-        if (!this.orderTicket) {
-            const box = document.createElement('div');
-            box.className = 'desk-ticket';
-            const row = document.createElement('div');
-            row.className = 'desk-ticket-row';
-            const makeSide = (side: 'buy' | 'sell') => {
-                const node = document.createElement('button');
-                node.className = `desk-ticket-side ${side}`;
-                node.title = side === 'buy'
-                    ? '买入（市价加多；空头时＝平仓）' : '卖出（市价加空；多头时＝平仓）';
-                const price = document.createElement('span');
-                price.className = 'desk-ticket-price';
-                price.textContent = '--';
-                const label = document.createElement('span');
-                label.className = 'desk-ticket-label';
-                label.textContent = side === 'buy' ? '买入' : '卖出';
-                node.append(price, label);
-                node.addEventListener('click', () => this._ticketClick(side));
-                return { node, price, label };
-            };
-            const buy = makeSide('buy');
-            const spread = document.createElement('div');
-            spread.className = 'desk-ticket-spread';
-            spread.textContent = '--';
-            spread.title = '点差（卖一 − 买一）';
-            const sell = makeSide('sell');
-            row.append(buy.node, spread, sell.node);
-            this.ticketBuy = buy;
-            this.ticketSell = sell;
-            this.ticketSpread = spread;
-            // ★ 只有三个格子：**没有手数 / 价格 / 档位输入**，
-            //   手数取二级报价里的手数，下单是市价（set_target_volume ✓）
-            box.append(row);
-            // 和 minibt 实时图一样插进**原生图例**（OHLC 行下面、指标行上面）
-            const cell = this.cells[0] as unknown as {
+    /**
+     * **每格**一条买卖盘：建在图例里（OHLC 行下面、指标行上面）✓
+     *
+     * 切布局 / 新加格子后必须重新挂（旧图例被卸载 → 节点丢了 ✗）
+     */
+    private _ensureTickets(): void {
+        for (let index = 0; index < this.cells.length; index += 1) {
+            const existing = this.tickets[index];
+            // `isConnected === false` 才是真的脱落（切布局后旧图例被卸载 ✗）
+            if (existing && existing.element.isConnected !== false) {
+                existing.setVisible(this.ticketsOn);
+                continue;
+            }
+            const cell = this.cells[index] as unknown as {
                 legend?: { div?: HTMLElement; seriesContainer?: HTMLElement };
             } | undefined;
-            const legend = cell?.legend;
-            let placed = false;
-            const legendDiv = legend?.div;
-            if (legendDiv instanceof HTMLElement) {
-                const wrapper = legend?.seriesContainer?.parentNode;
-                if (wrapper && wrapper.parentNode === legendDiv) {
-                    legendDiv.insertBefore(box, wrapper);
-                } else {
-                    legendDiv.appendChild(box);
-                }
-                placed = true;
+            const legendDiv = cell?.legend?.div;
+            if (!(legendDiv instanceof HTMLElement)) continue;
+            const bar = new TicketBar({
+                decimals: this.ticketDecimals,
+                visible: this.ticketsOn,
+                onOrder: (side) => this._ticketClick(side),
+                title: '买卖盘（工具栏「买卖盘」统一显示 / 隐藏）',
+            });
+            const wrapper = cell?.legend?.seriesContainer?.parentNode;
+            if (wrapper && wrapper.parentNode === legendDiv) {
+                legendDiv.insertBefore(bar.element, wrapper);
+            } else {
+                legendDiv.appendChild(bar.element);
             }
-            if (placed) box.classList.add('in-legend');
-            else this.element.appendChild(box);
-            this.orderTicket = box;
+            this.tickets[index] = bar;
+            this._applyTicketBook(index);
         }
-        this._renderTicket();
-        this.orderTicket.classList.add('on');
     }
 
     /**
      * 买卖盘一点下单（市价 / 目标仓位 ✓）
-     *
-     * 多头：`买入` 继续加多、`平仓` 全平；空头：`平仓` 全平、`卖出` 继续加空。
-     * 手数取**二级报价里的手数**；期货走天勤 `TargetPosTask.set_target_volume` ✓
      */
     private _ticketClick(side: 'buy' | 'sell'): void {
-        // 本地图表：买 / 卖都按**最新收盘价**成交；有反向持仓时自动平仓 ✓
-        const qty = Math.max(1, Number(this.orderQty) || 1);
-        const close = (this.localNet > 0 && side === 'sell')
-            || (this.localNet < 0 && side === 'buy');
-        this.options.onCommand?.('local_order', {
-            symbol: this._activeLocalName(),
-            side, qty, price: this.localPrice, close,
+        const qty = this.orderQty;
+        this.options.onCommand?.('ticket_order', {
+            symbol: this.symbolForCell(this.activeCell), side, qty,
         });
-    }
-
-    /** 刷新买卖盘（价格 / 点差 / 标签 / 颜色 ✓） */
-    private _renderTicket(): void {
-        if (!this.orderTicket) return;
-        const decimals = this.ticketDecimals;
-        const bid = this.ticketBid;
-        const ask = this.ticketAsk;
-        const net = this.ticketNet;
-        const leftClose = net < 0;
-        const rightClose = net > 0;
-        const left = this.ticketBuy;
-        const right = this.ticketSell;
-        if (left) {
-            left.price.textContent = ask === null ? '--' : ask.toFixed(decimals);
-            left.label.textContent = leftClose ? '平仓' : '买入';
-            left.node.classList.toggle('flat', leftClose);
-        }
-        if (right) {
-            right.price.textContent = bid === null ? '--' : bid.toFixed(decimals);
-            right.label.textContent = rightClose ? '平仓' : '卖出';
-            right.node.classList.toggle('flat', rightClose);
-        }
-        const spread = this._spread();
-        if (this.ticketSpread) {
-            this.ticketSpread.textContent = spread === null
-                ? '--' : spread.toFixed(decimals);
-        }
-        this.orderTicket.classList.toggle('has-position', !!net);
     }
 
     /** 轻提示（回放结束等 ✓） */
@@ -3562,6 +3589,25 @@ export class LocalChartPage {
     private _linkGuard = false;
 
     /**
+     * 联动**回声保护**（2026-11-03，和看盘页同一处 bug ✗）
+     *
+     * A 推 B → B 又推回 A 无限互推；实时/回放数据更新触发的自动滚动也走
+     * 这个回调 → 手动平移立刻被覆盖（「最新 K 线钉在右边 + 越拖越放大」✗）
+     */
+    private _linkApplying = false;
+
+    private readonly _linkApplied: Array<{ from: number; to: number } | null>
+        = [];
+
+    private static _sameRange(a: { from: number; to: number } | null | undefined,
+                              b: { from: number; to: number } | null | undefined,
+                              epsilon = 1e-3): boolean {
+        if (!a || !b) return false;
+        return Math.abs(a.from - b.from) <= epsilon
+            && Math.abs(a.to - b.to) <= epsilon;
+    }
+
+    /**
      * 联动：**时间轴 + 十字线**都同步（多格 / 回放都生效 ✓）
      *
      * LWC 没有「把十字线设到某个时间」的公开 API 之外的办法，
@@ -3591,15 +3637,30 @@ export class LocalChartPage {
             // ① 可视区间同步
             chart.timeScale().subscribeVisibleLogicalRangeChange(
                 (range: unknown) => {
-                    if (!this.linked || !range) return;
-                    charts.forEach((other, otherIndex) => {
-                        if (otherIndex === index) return;
-                        try {
-                            other.timeScale().setVisibleLogicalRange(range);
-                        } catch {
-                            /* ignore */
-                        }
-                    });
+                    if (!this.linked || !range || this._linkApplying) return;
+                    const value = range as { from?: unknown; to?: unknown };
+                    const from = Number(value.from);
+                    const to = Number(value.to);
+                    if (!Number.isFinite(from) || !Number.isFinite(to)) return;
+                    if (LocalChartPage._sameRange(
+                            { from, to }, this._linkApplied[index])) {
+                        return;      // 刚推过来的回声 → 不再回推 ✗
+                    }
+                    this._linkApplying = true;
+                    try {
+                        charts.forEach((other, otherIndex) => {
+                            if (otherIndex === index) return;
+                            this._linkApplied[otherIndex] = { from, to };
+                            try {
+                                other.timeScale().setVisibleLogicalRange(
+                                    { from, to });
+                            } catch {
+                                /* ignore */
+                            }
+                        });
+                    } finally {
+                        this._linkApplying = false;
+                    }
                 });
             // ② 十字线同步：本地图表按**索引**对齐（各 CSV 时间范围不同 ✓）
             chart.subscribeCrosshairMove((param: Record<string, unknown>) => {
@@ -4175,7 +4236,8 @@ export class LocalChartPage {
         this.tradeButton?.classList.toggle('on', this.dockVisible);
         this.bookButton?.classList.toggle('on', this.bookVisible);
         this.linkButton?.classList.toggle('on', this.linked);
-        this.ticketButton?.classList.toggle('on', this.orderTicketVisible);
+        this.ticketButton?.classList.toggle('on',
+            this.ticketVisible.some((item) => item));
     }
 
     /** 预警列表（后端 `{type:'alerts'}` 补丁 → 对话框列表 ✓） */
@@ -4790,15 +4852,19 @@ export class LocalChartPage {
         this.dock.appendLog(text, level, ts);
     }
 
-    /** 净仓 → 买卖盘标签（多仓右侧平仓 / 空仓左侧平仓 ✓） */
+    /**
+     * 净仓 → **该格**买卖盘标签（多仓右侧平仓 / 空仓左侧平仓 ✓）
+     */
     private _setTicketPosition(
-            payload: { long?: PosSide | null; short?: PosSide | null }): void {
+            payload: { long?: PosSide | null; short?: PosSide | null },
+            cell = 0): void {
         const long = Number(payload?.long?.volume || 0);
         const short = Number(payload?.short?.volume || 0);
         const net = Math.round(long - short);
-        if (net === this.ticketNet) return;
-        this.ticketNet = net;
-        this._renderTicket();
+        this._ensureTickets();
+        this.tickets[this._cellIndex(cell)]?.setNet(net);
+        // ★ 交易面板四按钮按**多 / 空持仓**切换（锁仓 = 两边都 > 0 ✓）
+        this.localTicket?.setPosition(long, short);
     }
 
     /** 导出历史（`app.ts` 收到 `exports` 补丁时分发过来 ✓） */
@@ -4848,17 +4914,34 @@ export class LocalChartPage {
         const value = Math.max(0, Math.min(6, Math.round(decimals)));
         if (value === this.ticketDecimals) return;
         this.ticketDecimals = value;
-        this._renderTicket();
+        for (let index = 0; index < this.tickets.length; index += 1) {
+            this.tickets[index]?.setDecimals(value);
+        }
         this.alertDialog?.setDecimals(value);
     }
 
-    /** 二级报价（5 档 + 信息 + 分笔）—— 只读，P4 才有下单按钮 ✓ */
-    setBook(data: BookData): void {
+    /**
+     * 二级报价（5 档 + 信息 + 分笔）—— 只读，P4 才有下单按钮 ✓
+     *
+     * `cell` 指定时只刷那一格的买卖盘（多布局每格自己的合约 ✓）
+     */
+    setBook(data: BookData, cell?: number): void {
         const decimals = Number((data as unknown as { decimals?: number })
             .decimals);
         if (Number.isFinite(decimals)) this.setDecimals(decimals);
+        const book = { bids: data.bids || [], asks: data.asks || [] };
+        // 带 `cell` → 只刷那一格的买卖盘（按格订阅推过来的 ✓）
+        if (typeof cell === 'number' && Number.isFinite(cell)) {
+            this.setTicketBook(book, cell);
+            return;
+        }
+        // ★ 不是**当前焦点合约**的盘口 → 不动右侧「二级报价」面板 ✓
+        if (this._isStaleBook(data)) {
+            this.setTicketBook(book);
+            return;
+        }
         this.book.setBook(data);
-        this.setTicketBook({ bids: data.bids || [], asks: data.asks || [] });
+        this.setTicketBook(book);
         // 买卖盘价格跟买一/卖一走，不填最新价 ✓
     }
 
@@ -4874,8 +4957,11 @@ export class LocalChartPage {
     setPosition(payload: { long?: PosSide | null; short?: PosSide | null },
                 cell?: number): void {
         this.lastPosition = payload;
-        this.lastPositions.set(typeof cell === 'number' ? cell : 0, payload);
-        this._setTicketPosition(payload);
+        const ticketCell = typeof cell === 'number' ? cell : 0;
+        this.lastPositions.set(ticketCell, payload);
+        // ★ 每格自己的买卖盘都更新（以前只喂格 1 → 其它格「平仓」标签永远不出来 ✗）
+        this._setTicketPosition(payload, ticketCell);
+
         // ★ 多布局：指定格子时临时切到那一格的 handler，画完再切回 ✓
         const saved = this.handler;
         const target = (typeof cell === 'number')
@@ -5072,7 +5158,11 @@ export class LocalChartPage {
                 const price = Number(item.price);
                 if (!Number.isFinite(price) || price <= 0) continue;
                 const side = String(item.side || '买');
-                const color = side === '卖' ? '#ef5350' : '#26a69a';
+                // ★ 平仓委托 → 平仓线（橙色 + 「平仓」字样），成交后自动消失 ✓
+                const offset = String(item.offset || '开');
+                const isClose = offset.startsWith('平');
+                const color = isClose ? '#ffb74d'
+                    : (side === '卖' ? '#ef5350' : '#26a69a');
                 const line = new HorizontalLine(
                     { time: null, logical: 0 as never, price },
                     {
@@ -5095,11 +5185,13 @@ export class LocalChartPage {
                 const badge = document.createElement('div');
                 badge.className = 'desk-order-badge';
                 const qty = Number(item.qty) || 0;
-                const text = `挂单${side}${qty ? Math.round(qty) : ''}手 `
+                const text = `${isClose ? '平仓' : '挂单'}${side}`
+                    + `${qty ? Math.round(qty) : ''}手 `
                     + price.toFixed(this.localDecimals);
                 badge.textContent = text;
-                badge.title = `${side}${String(item.offset || '开')} ${qty} 手`
-                    + ` @ ${price}（未成交）`;
+                badge.title = `${side}${offset} ${qty} 手 @ ${price}`
+                    + `（未成交：价格到 ${price} 才触发）`;
+                badge.classList.toggle('close', isClose);
                 badge.style.borderColor = color;
                 badge.style.color = color;
                 badge.dataset.price = String(price);

@@ -15,8 +15,10 @@ def test_tick_pumps_tqsdk():
     """tqsdk 必须调 wait_update，否则行情永远不更新（用户实测冻在 10:30 ✗）"""
     app = _read('minibt/desk/app.py')
     assert 'def pump(self, timeout: float = None)' in app
-    # ⚠ tqsdk 的 deadline 是**绝对时间戳**，不是“等多少秒” ✓
-    assert 'wait(deadline=time.time() + span)' in app
+    # ⚠ tqsdk 的 deadline 是**绝对时间戳**；富途 StockApi 是**秒数** ✓
+    assert 'else time.time() + span)' in app
+    assert "span if hasattr(api, 'poll_interval')" in app
+    assert 'wait(deadline=deadline)' in app
     assert 'PUMP_DEADLINE = 0.05' in app
     assert "step('行情泵', self.pump)" in app
 

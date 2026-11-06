@@ -13,7 +13,7 @@ def _ts(name):
 def test_shared_replay_ticket_exists():
     ticket = _ts('replay-ticket.ts')
     assert 'export function buildReplayTicket' in ticket
-    for label in ("'买入'", "'卖出'", "'平仓'", "'市价平仓'",
+    for label in ("'加多'", "'加空'", '`平多${', "'市价平仓'",
                   "'反手'", "'撤单'"):
         assert label in ticket, label
     assert "'价格'" in ticket and "'手数'" in ticket
@@ -26,7 +26,7 @@ def test_local_chart_uses_shared_ticket():
     assert "from './replay-ticket'" in local
     assert 'buildReplayTicket({' in local
     # 本地图表自己的控件不再手搓 ✗（改用共用组件 ✓）
-    assert "buy.textContent = '买入'" not in local
+    assert "buy.textContent = '加多'" not in local
 
 
 def test_chart_page_has_shared_ticket():

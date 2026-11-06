@@ -211,6 +211,28 @@ def test_frontend_list_page_and_entries():
         assert gone not in css, gone
 
 
+def test_thumbnail_cache_version_prevents_double_badge(tv):
+    """旧缩略图缓存（烘焙着角标的那批）必须自动失效，否则**双重标注** ✗
+
+    用户 2026-11-03 实测：手动截图（PNG）只有 1 个「指标」角标，
+    默认生成的 SVG 却有 2 个 —— 因为磁盘上的旧 SVG 还烘焙着角标，
+    新加的 HTML 角标叠在上面。
+    """
+    svg = tv.thumbnail_svg('tv:SuperTrend', 'light')
+    assert f'minibt-thumb:{tv.THUMB_VERSION}' in svg
+    assert 'text-anchor="middle"' not in svg        # 不再烘焙角标 ✓
+    # 老格式（没有版本标记）→ 当作"没图"，前端会请求重新生成 ✓
+    legacy = pathlib.Path(tv.CARD_DIR) / 'tv_SuperTrend.svg'
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        '<svg><rect/><text text-anchor="middle">指标</text></svg>',
+        encoding='utf-8')
+    assert tv._existing_card('tv:SuperTrend', 'light') == ''
+    assert tv.snapshot_path('tv:SuperTrend', 'light') == str(legacy)
+    assert tv._svg_is_current(str(legacy)) is True
+    assert tv._existing_card('tv:SuperTrend', 'light') == str(legacy)
+
+
 def test_card_tag_is_html_overlay(tv):
     """卡片右上角「指标 / 策略」标记用 **HTML** 画：手动截图（PNG 封面）也有 ✓
 
@@ -319,6 +341,28 @@ def test_close_tab_goes_to_neighbour():
     assert 'const order = [...this.tabs.keys()];' in body
     assert 'const neighbour = order[index + 1] || order[index - 1]' in body
     assert 'if (neighbour && neighbour !== HOME_TAB_ID)' in body
+
+
+def test_back_top_button_is_css_anchored():
+    """「回到顶部」圆钮用 CSS `fixed; right/bottom`，不能靠 JS 算 left/top ✓
+
+    用户 2026-11-03 实测：设置里调过**界面缩放**（`ui_zoom ≠ 1`，desk 根节点带
+    `transform: scale()`）后，圆钮被切掉一半 —— `position: fixed` 的定位基准是
+    那个**被缩放过的根节点**，而 JS 用 `getBoundingClientRect()`（视口坐标）算的
+    left/top 会被再缩放一次 ✗（zoom 1.1 实测按钮跑到 1263,781，视口只有 1200×720）。
+    """
+    page = _read(DESK_TS / 'tv-page.ts')
+    body = page.split('private _syncTopButton()', 1)[1][:1500]
+    assert 'button.style.left' not in body
+    assert 'button.style.top' not in body
+    css = _read(DESK_TS / 'desk.css')
+    block = css.split('.desk-tv-top {', 1)[1].split('}', 1)[0]
+    assert 'position: fixed;' in block
+    assert 'right: 22px;' in block and 'bottom: 22px;' in block
+    # ★ 箭头用 SVG（20px）+ 40px 圆：文字 `↑` 太小且垂直居中不稳（用户反馈 ✗）
+    assert 'width: 40px; height: 40px;' in block
+    assert "'<svg viewBox=\"0 0 24 24\" width=\"20\" height=\"20\"" in page
+    assert '.desk-tv-top svg { display: block;' in css
 
 
 def test_backend_source_and_live_commands():

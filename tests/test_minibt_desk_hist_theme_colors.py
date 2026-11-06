@@ -50,3 +50,103 @@ def test_draw_rail_hides_scrollbar_but_keeps_wheel():
     # 构建产物也要带上 ✓
     built = _read('pylightcharts/js/desk.css')
     assert '.desk-draw-rail::-webkit-scrollbar' in built
+
+
+# ---------------------------------------------------------------- 默认柱体色
+def _macd_frame(rows: int = 240):
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(7)
+    close = 100 + np.cumsum(rng.normal(0, 0.4, rows))
+    return pd.DataFrame({
+        'datetime': pd.date_range('2024-01-01', periods=rows, freq='min'),
+        'open': close - rng.normal(0, 0.2, rows),
+        'high': close + abs(rng.normal(0, 0.3, rows)),
+        'low': close - abs(rng.normal(0, 0.3, rows)),
+        'close': close,
+        'volume': rng.integers(100, 900, rows).astype(float),
+    })
+
+
+def test_palette_default_colors_mean_unset():
+    """`Colors.bull_color` / `bear_color`（调色板**半透明**默认值）＝"没设置" ✓
+
+    用户 2026-11-03：desk 里 MACD 柱体又暗又偏，跟主图成交量一个颜色 ✗。
+    根因：库里（`pandas_ta.py` / `tradingview.py`）默认就拿
+    `Colors.bull_color='rgba(39,157,130,100)'`（alpha 100/255 ≈ 0.39）当柱体色，
+    于是绕过了「没配 → 用主题 K 线涨跌色」的回退 ✗。
+    """
+    from minibt.desk.indicator_catalog import _vbar_color
+
+    for palette in ('rgba(39, 157, 130, 100)', 'rgba(200, 97, 100, 100)',
+                    '#279d82', '#c86164', 'rgba(39, 157, 130, 0.392)'):
+        assert _vbar_color(palette) is None, palette
+    # 用户自己设的颜色照旧生效 ✓
+    assert _vbar_color('#ff0000') == '#ff0000'
+    assert _vbar_color('red') == 'red'
+    assert _vbar_color(None) is None
+
+
+def test_default_vbar_follows_kline_up_down():
+    """默认柱体：`vbar_base` 以上 → K 线上涨色、以下 → 下跌色 ✓
+
+    后端不再下发 `upColor/downColor`（留空）→ 前端 `indicator.ts` 用
+    `theme().up` / `theme().down`，也就是主图蜡烛的涨跌色；`base` 默认 0，
+    用户设了 `vbar_base` 就按用户的值。
+    """
+    import minibt.desk.indicator_catalog as ic
+
+    out = ic.compute(_macd_frame(), ['pta_macd'])
+    items = out if isinstance(out, list) else (out.get('items') or [])
+    hist = next(item for item in items if item['kind'] == 'hist')
+    assert hist['base'] == 0.0                       # 默认分界 0 ✓
+    assert not hist.get('upColor')                   # 留空 → 主题涨色 ✓
+    assert not hist.get('downColor')                 # 留空 → 主题跌色 ✓
+    # 图例小方块仍用指标线色（不跟着变 ✓）
+    assert hist.get('color')
+
+
+def test_strategy_vbar_defaults_follow_theme():
+    """策略链路的柱体也一样：调色板默认色 → 留空（不退回指标线色 ✗）"""
+    import pandas as pd
+
+    from minibt.desk import strategy_overlay as so
+    from minibt.strategy.realtime import IndicatorSpec
+
+    frame = pd.DataFrame({
+        'datetime': pd.date_range('2024-01-01', periods=3, freq='min'),
+        'close': [1.0, 2.0, 3.0],
+    })
+
+    class Runner:
+        def __init__(self, specs):
+            self._specs = specs
+
+        def specs(self, plot_id=0):
+            return self._specs
+
+        def frame(self, plot_id=0):
+            return frame
+
+        def signals(self, plot_id=0):
+            return []
+
+    spec = IndicatorSpec(name='macdh', overlap=False,
+                         values=pd.Series([1.0, -1.0, 2.0]),
+                         kind='Histogram', vbar_base=0.0,
+                         vbar_up_color='rgba(39, 157, 130, 100)',
+                         vbar_down_color='rgba(200, 97, 100, 100)',
+                         source='macd')
+    item = next(i for i in so._items_for_plot(Runner([spec]), 0, frame, frame)
+                if i.get('kind') == 'hist')
+    assert item['base'] == 0.0
+    assert item['upColor'] is None and item['downColor'] is None
+
+    # 用户自定义颜色 / 自定义 base → 原样下发 ✓
+    spec.vbar_up_color, spec.vbar_down_color = '#ff0000', '#00ff00'
+    spec.vbar_base = 50.0
+    item = next(i for i in so._items_for_plot(Runner([spec]), 0, frame, frame)
+                if i.get('kind') == 'hist')
+    assert (item['upColor'], item['downColor']) == ('#ff0000', '#00ff00')
+    assert item['base'] == 50.0

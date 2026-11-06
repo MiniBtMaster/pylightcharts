@@ -124,8 +124,8 @@ def test_trading_state_and_gate(tmp_path):
     desk = _desk(tmp_path)
     state = desk.trading_state()
     assert state['type'] == 'trading' and state['enabled'] is True
-    # P33 起账户名带来源前缀（天勤模拟·快期模拟 / 股票本地模拟 ✓）
-    assert state['real'] is False and state['account'].endswith('快期模拟')
+    # ★ 2026-11-05 统一账户：快期模拟 → 标签就是「天勤模拟」✓
+    assert state['real'] is False and state['account'] == '天勤模拟'
     assert state['kind'] == 'futures'
 
     off = _desk(tmp_path, allow_trading=False)
@@ -141,7 +141,7 @@ def test_place_order_passes_account_and_logs(tmp_path):
     assert order['direction'] == 'BUY' and order['offset'] == 'OPEN'
     assert order['volume'] == 2 and order['limit_price'] == 3600.0
     assert order['account'] is not None          # 多账户必带 account ✓
-    assert '手 @' in text and '快期模拟' in text
+    assert '手 @' in text and '天勤模拟' in text
 
     # 市价（price=None）也要能下 ✓
     desk.trading_view().place('SHFE.rb2610', 'sell', 1, None)
@@ -160,12 +160,21 @@ def test_actions_close_reverse_all_cancel(tmp_path):
     trader = desk.trading_view()
     api = desk.futures.api
 
+    # ★ 2026-11-05：平仓 / 反手 / 全平改成**限价单（对手价）**——
+    #   上期所等交易所不支持市价单（`limit_price=None` 会被拒 ✗）
     trader.action('close', 'SHFE.rb2610')
-    assert api.targets[-1] == ('SHFE.rb2610', 0)
+    last = api.orders[-1]
+    assert (last['direction'], last['offset']) == ('SELL', 'CLOSE')
+    assert last['volume'] == 2
     trader.action('reverse', 'SHFE.rb2610')
-    assert api.targets[-1] == ('SHFE.rb2610', -2)
-    trader.action('all')                          # 全部平 → 逐合约 target 0 ✓
-    assert api.targets[-1] == ('SHFE.rb2610', 0)
+    close_call = api.orders[-2]
+    open_call = api.orders[-1]
+    assert (close_call['offset'], open_call['offset']) == ('CLOSE', 'OPEN')
+    assert (close_call['direction'], open_call['direction']) == (
+        'SELL', 'BUY')
+    before = len(api.orders)
+    trader.action('all')                          # 全部平 → 逐个合约平仓 ✓
+    assert len(api.orders) > before
 
     assert '撤' in trader.action('cancel_all', 'SHFE.rb2610')
     assert api.cancelled == ['O1']
@@ -192,15 +201,17 @@ def test_commands_place_and_account_action(tmp_path):
     }))
     kinds = [_payload(script)['type'] for script in desk.sent]
     assert 'toast' in kinds and 'account' in kinds
-    assert desk.futures.api.targets[-1] == ('SHFE.rb2610', 0)
+    last = desk.futures.api.orders[-1]
+    assert (last['direction'], last['offset']) == ('SELL', 'CLOSE')
 
 
 def test_real_account_needs_confirmation_flag(tmp_path):
     desk = _desk(tmp_path, accounts=[_Sim(), _Real()])
-    desk.account_view().switch(1)
+    # ★ 统一账户：切到 TqAccount（实盘）→ real=True ✓
+    assert desk.set_account_kind('real')
     state = desk.trading_state()
     assert state['real'] is True
-    assert 'H宏源期货' in state['account']
+    assert '实盘' in state['account']
 
 
 def test_book_trading_flag_follows_gate(tmp_path):

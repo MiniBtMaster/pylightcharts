@@ -134,8 +134,11 @@ def test_pages_wire_drawings_sync():
         assert "'save_drawings', { key, items }" in page
         assert "'drawings', { key }" in page
         assert 'applyDrawings(payload: { key?: string; items?: unknown[] }): void {' in page
-        # ★ 键 = 合约|周期（同品种不同周期分开 ✓）
-        assert 'return `${symbol}|${Number(this.cycle) || 0}`;' in page
+        # ★ 键 = 合约|周期（同品种不同周期分开；周期**按格**取 ✓）
+        if name == 'chart-page.ts':
+            assert 'return `${symbol}|${this.cycleOfCell(index)}`;' in page
+        else:
+            assert 'return `${symbol}|${Number(this.cycle) || 0}`;' in page
         # 画线工具箱 = 共用一个（只显示当前格 ✓）
         assert 'sync.showToolBox(this.toolBoxOn, this._activeHandlerId());' in page
         # 换周期 / 换合约 / 换布局 / 清空 都要刷新 ✓

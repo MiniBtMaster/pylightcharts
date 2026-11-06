@@ -19,7 +19,7 @@
 > 自选、筛选器、热力图、跑马灯、报价头、技术分析、季节性、新闻、日历、品种详情…），
 > 渲染在同一个宿主页上、由 Python 驱动。见[金融插件](#金融插件tradingview-风格插件)。
 >
-> 更新日志：[`docs/changelog.md`](docs/changelog.md) —— 当前 **0.1.8**。
+> 更新日志：[`docs/changelog.md`](docs/changelog.md) —— 当前 **0.1.9**。
 
 ## 工作原理
 

@@ -11,6 +11,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { IndicatorLayer } from '../src/desk/indicator';
+import { chartPalette } from '../src/desk/theme';
 import { DomStub, StubElement, installDom } from './dom';
 
 let dom: DomStub;
@@ -120,6 +121,23 @@ describe('histogram indicator colors', () => {
         expect(series.data.map((row) => row.color)).toEqual([
             'rgba(39, 157, 130, 0.392)', 'rgba(200, 97, 100, 0.392)',
             'rgba(39, 157, 130, 0.392)', 'rgba(200, 97, 100, 0.392)',
+        ]);
+    });
+
+    it('matches the candle palette when the backend sends null', () => {
+        // 后端（`indicator_catalog` / `strategy_overlay`）默认**不下发**
+        // `upColor/downColor`（JSON 里是 null）→ 柱子必须跟主图 K 线涨跌色
+        // 一模一样（用户 2026-11-03：默认柱体太暗、像成交量 ✗）
+        const { chart, created } = makeChart();
+        const dark = chartPalette('dark');
+        const layer = makeLayer(chart, dark.up, dark.down);
+        layer.apply({
+            type: 'indicator', symbol: 'X',
+            items: [{ ...ITEM, upColor: null, downColor: null }],
+        } as never);
+        const series = created.find((item) => item.type === 'hist')!;
+        expect(series.data.map((row) => row.color)).toEqual([
+            dark.up, dark.down, dark.up, dark.down,
         ]);
     });
 

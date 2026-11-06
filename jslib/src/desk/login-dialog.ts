@@ -24,6 +24,12 @@ export interface LoginDialogOptions {
     onOpenUrl?: (url: string) => void;
     /** 切到某个面板 → 让后端把记住的账号推过来（预填 ✓） */
     onCommand?: (kind: LoginKind) => void;
+    /**
+     * 表单内容变了 → **立即落盘**（用户 2026-11-05 要求 ✓）
+     *
+     * 以前只有点「登录」才保存；用户填完直接关窗 → 下次打开还是空的 ✗
+     */
+    onDirty?: (kind: LoginKind, values: Record<string, unknown>) => void;
 }
 
 /** 天勤可登录的期货公司（和 miniqt 的 `FUTURES_BROKERS` 一致 ✓） */
@@ -176,6 +182,14 @@ const CSS = `
     margin-left: auto; border: 0; background: transparent; cursor: pointer;
     color: var(--desk-accent); font-size: 12px; padding: 0;
 }
+/* 校验失败：轻微抖动，提示"有字段没填" ✓ */
+.desk-login.shake { animation: desk-login-shake .28s ease-in-out; }
+@keyframes desk-login-shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-5px); }
+    75% { transform: translateX(5px); }
+}
+
 .desk-login-real[hidden] { display: none; }
 .desk-login-real {
     padding-top: 8px; border-top: 1px dashed var(--desk-border); margin-bottom: 4px;
@@ -234,6 +248,9 @@ export class LoginDialog {
     private theme: DeskTheme;
     private kind: LoginKind = 'futures';
     private busy = false;
+    /** 「填了就记住」的防抖定时器 / 是否已挂监听 ✓ */
+    private dirtyTimer = 0;
+    private dirtyWatched = false;
 
     private readonly tabs: Record<LoginKind, HTMLButtonElement>;
     private readonly panes: Record<LoginKind, HTMLDivElement>;
@@ -282,6 +299,7 @@ export class LoginDialog {
         };
         this.realBlock = this.panes.futures.querySelector(
             '.desk-login-real') as HTMLDivElement;
+        this._watchDirty();
         this.status = document.createElement('div');
         this.status.className = 'desk-login-status';
         body.append(this.panes.futures, this.panes.stocks, this.status);
@@ -347,7 +365,9 @@ export class LoginDialog {
         pane.dataset.pane = 'futures';
         const sub = document.createElement('div');
         sub.className = 'desk-login-sub';
-        sub.textContent = '请登录您的天勤期货账号（不登录也能用离线功能）';
+        // ★ 已连接时再登录 = **切换账户**（会断开旧连接并重新订阅 ✓）
+        sub.textContent = '请登录您的天勤期货账号'
+            + '（已连接时再登录 = 切换账户，会重新订阅行情）';
 
         const password = this._input('password', '请输入密码', 'password');
         const passwordRow = this._row('密码', password);
@@ -364,7 +384,8 @@ export class LoginDialog {
         const flags = document.createElement('div');
         flags.className = 'desk-login-flags';
         flags.innerHTML = `
-            <label><input type="checkbox" data-f="remember">记住密码</label>
+            <label title="勾选后记住用户名 / 密码 / 期货公司 / 资金账号（交易密码永不保存）"
+                ><input type="checkbox" data-f="remember">记住密码</label>
             <label><input type="checkbox" data-f="real">使用实盘账户</label>
             <button class="desk-login-link" data-help="real"
                 title="实盘账户说明 / 免责声明">帮助</button>`;
@@ -376,19 +397,36 @@ export class LoginDialog {
         const realBlock = document.createElement('div');
         realBlock.className = 'desk-login-real';
         realBlock.hidden = true;
-        const select = document.createElement('select');
+        // ★ 期货公司用**可输入 + 建议列表**（不是死下拉 ✓）
+        //   用户 2026-11-05：上次选的期货公司没记住（因为下拉里没有那一项，
+        //   `setSaved` 只认"列表里存在的值"→ 就被清成「请选择期货公司」✗）。
+        //   换成 input + datalist 后：任何期货公司都能填，记住的值**一定回填** ✓
+        const select = document.createElement('input');
         select.dataset.f = 'broker';
+        select.type = 'text';
+        select.autocomplete = 'off';
+        select.placeholder = '例如 H宏源期货';
+        select.title = '实盘必须填写期货公司（如 H宏源期货）';
+        select.setAttribute('list', 'desk-login-brokers');
+        const brokerList = document.createElement('datalist');
+        brokerList.id = 'desk-login-brokers';
         for (const [value, label] of BROKERS) {
             const option = document.createElement('option');
             option.value = value;
-            option.textContent = label;
-            select.appendChild(option);
+            option.label = label;
+            brokerList.appendChild(option);
         }
+        select.value = '';
+        const accountInput = this._input('account', '实盘资金账号');
+        const tradeInput = this._input('trade_password', '交易密码', 'password');
+        // ★ 交易密码**不保存**，每次都要重新输入（用户 2026-11-05 ✓）
+        tradeInput.title = '交易密码不保存，每次登录都要重新输入';
+        tradeInput.autocomplete = 'off';
         realBlock.append(
+            brokerList,
             this._row('期货公司', select),
-            this._row('资金账号', this._input('account', '实盘资金账号')),
-            this._row('交易密码', this._input('trade_password', '交易密码',
-                                               'password')),
+            this._row('资金账号', accountInput),
+            this._row('交易密码', tradeInput),
         );
         real.addEventListener('change', () => {
             realBlock.hidden = !real.checked;
@@ -425,8 +463,12 @@ export class LoginDialog {
         // ★ 股票交易入口：默认只行情；勾选后连接 Futu 交易账户
         const flags = document.createElement('div');
         flags.className = 'desk-login-flags';
+        // ★ 默认勾上：**模拟盘**用的是富途官方模拟账户（不是本地记账 ✓）
+        //   用户 2026-11-06：minibt 的持仓和富途 App 不一样 —— 因为以前
+        //   这里默认不勾，desk 走的是本地模拟账户 ✗
         flags.innerHTML = `
-            <label><input type="checkbox" data-f="trade">启用交易（富途账户）</label>`;
+            <label title="勾选后使用**富途官方账户**（模拟 / 真实）；不勾则用本地记账账户"
+                ><input type="checkbox" data-f="trade" checked>启用交易（富途账户）</label>`;
         const env = document.createElement('select');
         env.dataset.f = 'trd_env';
         for (const [value, label] of [['SIMULATE', '模拟交易'],
@@ -551,15 +593,70 @@ export class LoginDialog {
         return !!node?.checked;
     }
 
-    private _submit(): void {
-        if (this.busy) return;
+    /** 当前面板的表单值（勾选框是 boolean，输入框去空格 ✓） */
+    private _values(kind: LoginKind = this.kind): Record<string, unknown> {
         const values: Record<string, unknown> = {};
         for (const node of Array.from(
-            this.panes[this.kind].querySelectorAll('[data-f]'))) {
+            this.panes[kind].querySelectorAll('[data-f]'))) {
             const input = node as HTMLInputElement | HTMLSelectElement;
             const name = input.dataset.f!;
-            values[name] = input instanceof HTMLInputElement && input.type === 'checkbox'
+            values[name] = input instanceof HTMLInputElement
+                && input.type === 'checkbox'
                 ? input.checked : input.value.trim();
+        }
+        return values;
+    }
+
+    /** 有任何改动 → 400ms 后落盘（正在输入时不会每键都发 ✓） */
+    private _watchDirty(): void {
+        if (this.dirtyWatched) return;
+        this.dirtyWatched = true;
+        for (const kind of ['futures', 'stocks'] as LoginKind[]) {
+            const pane = this.panes[kind];
+            const handler = () => this._flushDirty(kind);
+            pane.addEventListener('input', handler);
+            pane.addEventListener('change', handler);
+        }
+    }
+
+    private _flushDirty(kind: LoginKind): void {
+        if (this.dirtyTimer) window.clearTimeout(this.dirtyTimer);
+        this.dirtyTimer = window.setTimeout(() => {
+            this.dirtyTimer = 0;
+            this.options.onDirty?.(kind, this._values(kind));
+        }, 400);
+    }
+
+    /** 立刻落盘（关闭登录框 / 提交前 ✓） */
+    private _saveNow(kind: LoginKind = this.kind): void {
+        if (this.dirtyTimer) {
+            window.clearTimeout(this.dirtyTimer);
+            this.dirtyTimer = 0;
+        }
+        this.options.onDirty?.(kind, this._values(kind));
+    }
+
+    private _submit(): void {
+        if (this.busy) return;
+        const values = this._values();
+        if (this.kind === 'futures') {
+            const username = String(values.username || '');
+            const password = String(values.password || '');
+            const real = !!values.real;
+            const missing: string[] = [];
+            if (!username) missing.push('用户名');
+            if (!password) missing.push('登录密码');
+            if (real) {
+                if (!String(values.broker || '')) missing.push('期货公司');
+                if (!String(values.account || '')) missing.push('资金账号');
+                if (!String(values.trade_password || '')) {
+                    missing.push('交易密码（每次都要输入）');
+                }
+            }
+            if (missing.length) {
+                this._warn(`还缺：${missing.join(' / ')}`);
+                return;
+            }
         }
         if (this.kind === 'stocks') {
             values.port = Number(values.port) || Number(FUTU_DEFAULT_PORT);
@@ -570,6 +667,18 @@ export class LoginDialog {
             }
         }
         this.options.onSubmit(this.kind, values);
+    }
+
+    /** 表单校验失败：状态栏红字提示（不提交 ✓） */
+    private _warn(text: string): void {
+        this.status.textContent = text;
+        this.status.className = 'desk-login-status error';
+        const box = this.element.querySelector('.desk-login') as HTMLElement;
+        if (box) {
+            box.classList.remove('shake');
+            void box.offsetWidth;      // 触发重排，动画能重放 ✓
+            box.classList.add('shake');
+        }
     }
 
     // ------------------------------------------------------------- 公开
@@ -595,12 +704,13 @@ export class LoginDialog {
     /** 后端记住的账号 → 预填（密码只在「记住密码」时才有 ✓） */
     setSaved(kind: LoginKind, saved: Record<string, any>): void {
         saved = saved || {};
-        // ★ 没记住密码时清空上一次的密码，避免关闭“记住密码”后仍误提交旧密码
+        // ★ 没记住密码时清空上一次的密码，避免关闭"记住密码"后仍误提交旧密码
         if (!('password' in saved)) {
             const password = this.panes[kind].querySelector(
                 '[data-f="password"]') as HTMLInputElement | null;
             if (password) password.value = '';
         }
+        // ① 先把保存过的值逐个回填（勾选框 = boolean，输入框 = 字符串 ✓）
         for (const [name, value] of Object.entries(saved)) {
             const node = this.panes[kind].querySelector(
                 `[data-f="${name}"]`) as HTMLInputElement | null;
@@ -608,10 +718,35 @@ export class LoginDialog {
             if (node.type === 'checkbox') node.checked = !!value;
             else if (value !== null && value !== undefined) node.value = String(value);
         }
+        // ② 再按"用户预期"修正默认值（**必须在回填之后**，否则又被覆盖 ✗）
+        const rememberNode = this.panes[kind].querySelector(
+            '[data-f="remember"]') as HTMLInputElement | null;
+        if (rememberNode && kind === 'futures') {
+            // 没保存过密码 → 默认勾上（点一次「登录」就把密码记住 ✓）
+            const hasPassword = typeof saved.password === 'string'
+                && saved.password !== '';
+            rememberNode.checked = saved.remember === undefined
+                ? true
+                : (!!saved.remember || !hasPassword);
+        }
+        const tradeNode = this.panes[kind].querySelector(
+            '[data-f="trade"]') as HTMLInputElement | null;
+        if (tradeNode && kind === 'stocks') {
+            // 模拟盘后端**始终**连官方模拟账户 → 勾选框反映真实情况 ✓
+            const env = String(saved.trd_env || 'SIMULATE').toUpperCase();
+            if (env === 'SIMULATE') tradeNode.checked = true;
+            else if (saved.trade !== undefined) tradeNode.checked = !!saved.trade;
+        }
+        // ③ 期货：实盘区块显隐 + 按钮文案 + 期货公司回填 ✓
         if (kind === 'futures') {
             const real = this._checked('real');
             this.realBlock.hidden = !real;
             this.submitButton.textContent = real ? '实盘登录' : '登录';
+            const brokerNode = this.panes.futures.querySelector(
+                '[data-f="broker"]') as HTMLInputElement | null;
+            if (brokerNode && saved.broker) {
+                brokerNode.value = String(saved.broker);
+            }
         }
     }
 
@@ -665,6 +800,8 @@ export class LoginDialog {
     }
 
     close(): void {
+        // ★ 关窗前把填的内容落盘（用户 2026-11-05：填完直接关就丢了 ✗）
+        this._saveNow();
         this.element.style.display = 'none';
         this.busy = false;
         this.submitButton.disabled = false;

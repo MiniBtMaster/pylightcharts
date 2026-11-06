@@ -27,7 +27,7 @@ Core features:
 
 Resources:
 - Author: owen (MiniBtMaster)
-- Version: 0.1.8
+- Version: 0.1.9
 - License: MIT License (charting engine: Apache-2.0, see NOTICE)
 - GitHub: https://github.com/MiniBtMaster/pylightcharts
 - PyPI: https://pypi.org/project/pylightcharts/
@@ -101,8 +101,8 @@ if TYPE_CHECKING:
     from .panels.ticker import (SingleTicker, Ticker, TickerTag, Tickers,
                                 TickerTape)
 
-__version__ = '0.1.8'
-__version_info__ = (0, 1, 8)
+__version__ = '0.1.9'
+__version_info__ = (0, 1, 9)
 __author__ = 'owen'
 __email__ = '407841129@qq.com'
 __license__ = 'MIT'

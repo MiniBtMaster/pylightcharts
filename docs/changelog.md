@@ -5,12 +5,81 @@ All notable changes to `pylightcharts` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
-# Changelog
+## [0.1.9] - 2026-11-06
 
-All notable changes to `pylightcharts` are documented in this file.
+本版是 **纯前端资源版本**：Python 侧（`abstract.py` / `chart.py` / `headless.py` /
+`colors.py` / `__init__.py`）与 0.1.8 **完全一致**，变化全部在 `pylightcharts/js/`
+（由 `jslib/` 重建）：`desk.js` 925 KB → **945 KB**，`desk.css` 115 KB → **119.5 KB**，
+`bundle.js` / `styles.css` / `lightweight-charts.js` 未变。
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/) and this
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+随 wheel 交付的 **minibt desk**（v1.3.6）改进：
+
+### 图表 / 布局
+
+- **多布局联动**：任一格拖动时间轴 → 其它格按时间对齐（不再互相"回声"抖动）；
+  每格独立的**周期**（工具栏 / 右键 / 自定义周期只改当前格）。
+- **买卖盘默认关闭**：每打开一页图表（含多布局每格）都从"关"开始；
+  显隐只由工具栏「买卖盘」一个开关控制，隐藏时整行高度归零。
+- **价格框 ▲▼**：空值时 ↑ = 卖一价、↓ = 买一价（无盘口退化为现价 ±1 跳）；
+  有值时按**最小变动价位**加减（不再 ±1）；原生 spinner 隐藏。
+- **「删除全部指标」修复**：加载指标模板（如 `uta_macd`）后也能一键清空
+  （多布局只清当前格，策略线保留）。
+- **回顶按钮**：改为 CSS 定位 + 20×20 SVG，缩放 0.9/1.0/1.1 都不再被裁切。
+
+### 交易
+
+- **快期四按钮面板**：按持仓状态自动切换（加多 / 加空 / 买平 / 平多X / 锁仓…），
+  到手手数夹在 1..持仓；**全部限价单**（对手价），上期所 / 中金所 / 能源中心 /
+  沪深均可用。
+- **平仓线 / 挂单线**：`平` / `平今` 订单显示橙色「平仓卖N手 …」，`开` 显示挂单线；
+  `Trading.release_target_task()` 防止 TargetPosTask 撤销人工限价单。
+- **锁仓处理**：上期所 / 能源中心按**平今 / 平昨**拆单；锁仓时持仓行右键需指定
+  平多 / 平空；反手在锁仓下禁用。
+- **修改当前委托单**：撤旧单 + 按新价 / 新手数重下的对话框。
+- **实盘二次确认 + 风控**：真实账户的 平 / 反 / 全 都要确认；模拟盘不需要。
+- **`market_price()` 兜底链**：卖一 / 买一 → 最新价 → 最近报价行 → 持仓均价，
+  永不发 `limit_price=None`。
+
+### 账户
+
+- **三个统一账户**：快期模拟 / 富途模拟 / TqAccount；两个下拉框（首页 + 交易账户页）
+  选项一致，未登录置灰。
+- **账户按页面 / 按格独立**：首页切账户只影响首页；每个实时图表页、多布局的每一格
+  都有自己的账户（`chart:SYM#cell`）；数据读取按 key 显式取实例。
+- **本地图表**：隐藏切账户下拉框，只接本地模拟账户（`local_account` 与真实账户补丁
+  双向隔离）。
+- **首次打开按合约自动选账户**：股票 → 富途模拟，期货 → 快期模拟
+  （即使登录了实盘也默认快期模拟）；单图**换标的**时同样按品种自动切。
+- **富途模拟 = 富途官方模拟盘**：`trd_env=SIMULATE` 时强制连官方模拟账户，
+  持仓 / 权益 / 委托优先读富途（与富途 App 一致）；CN/HK/US 各自独立模拟子账户；
+  日本个股 / ETF / REITs 无模拟盘 → 明确报错。
+
+### 登录 / 行情
+
+- **登录信息持久化**：用户名 / 记住密码 / 使用实盘 / 期货公司 / 资金账号
+  （股票：网关 / 端口 / 启用交易 / 交易环境 / 交易市场）都记住；
+  存独立文件 `~/.minibt/desk_login.json`；**边填边存**（400ms 防抖）+ 关窗再存 +
+  点登录先存；交易密码永不落盘。
+- **期货公司**改为可输入 + 建议列表（`H宏源期货 / H徽商期货 / Y银河期货`），
+  任意公司都能填、记住的值一定回填。
+- **股票行情泵**：`pump()` 同时驱动天勤与富途（富途侧 `deadline` 按"秒"传）；
+  股票 quote 补齐买一 / 卖一 / 开高低收 / 昨收；开盘前打开的一字线自动用最新价撑开。
+- **界面缩放** 设置移到「个性化 → 外观」，默认 100%。
+
+### 其它
+
+- `minibt desk --check` / `--help` 在 GBK 控制台不再因 `✓` 抛 `UnicodeEncodeError`。
+- 修复 `_chartPageFor()` 返回 `null` 时 `case 'account'` 每拍抛
+  `Cannot read properties of null (reading 'activeCellIndex')` → 交易账户面板空白。
+
+### 升级
+
+```bash
+pip install -U pylightcharts==0.1.9
+```
+
+- `README.md` / `README.zh-CN.md` 的「当前版本」指向 **0.1.9**；
+- 安装 / 升级：`pip install -U pylightcharts==0.1.9`。
 
 ## [0.1.8] - 2026-11-03
 

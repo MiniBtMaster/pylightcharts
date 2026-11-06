@@ -29,16 +29,18 @@ def test_close_uses_volume_aliases():
 
     trader.api = lambda symbol='': Api()
     text = trader.place('SHFE.rb2610', 'close', 2)
-    assert 'SELL' in text
+    # ★ 文案改成「卖平」（用户要求的中文：卖平 = 平多 ✓）
+    assert '卖平' in text
     assert calls and calls[0]['volume'] == 2
     assert calls[0]['offset'] == 'CLOSE'
+    assert calls[0]['direction'] == 'SELL'
 
 
 def test_close_all_reports_set_target_failure():
     trader = _trading()
     trader._positions = lambda: [SimpleNamespace(
         instrument_id='SHFE.rb2610', pos_long=1)]
-    trader._set_target = lambda symbol, target: '调仓失败: network down'
+    trader.insert = lambda *a, **k: '调仓失败: network down'
     assert '失败' in trader._close_all()
 
 
@@ -59,14 +61,17 @@ def test_reverse_does_not_open_when_close_fails():
     trader._position = lambda symbol: SimpleNamespace(pos_long=1)
     calls = []
 
-    def market(symbol, direction, offset, volume):
-        calls.append((direction, offset, volume))
-        return '下单失败：rejected'
+    def insert(symbol, side, offset, volume, price=None):
+        calls.append((side, offset, volume))
+        if offset == 'close':
+            return '下单失败：rejected'
+        return '开仓成功'
 
-    trader._market_order = market
+    trader.insert = insert
     text = trader.reverse_symbol('SHFE.rb2610')
     assert '反手失败' in text
-    assert calls == [('SELL', 'CLOSE', 1)]
+    # 平仓失败后**不能**再发开仓单 ✓
+    assert calls == [('sell', 'close', 1)]
 
 
 def test_clear_account_cache_drops_target_tasks():

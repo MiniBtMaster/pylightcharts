@@ -137,14 +137,16 @@ def test_ticket_is_transparent_and_minimal():
     side = css.split('.desk-ticket-side {', 1)[1].split('}', 1)[0]
     assert 'background: transparent' in side
 
-    page = _read('jslib/src/desk/chart-page.ts')
+    # 2026-11-03：买卖盘 DOM 挪到 `ticket-bar.ts`（每格一条 ✓）
+    bar = _read('jslib/src/desk/ticket-bar.ts')
+    assert 'row.append(this.buy.node, this.spread, this.sell.node)' in bar
     # 只有三个格子：没有手数 / 价格 / 档位输入 ✓
-    assert "box.append(row);" in page
-    assert 'desk-ticket-qty' not in page
-    assert 'desk-ticket-foot' not in page
-    assert 'desk-ticket-click-orders' not in page
+    for key in ('desk-ticket-qty', 'desk-ticket-foot',
+                'desk-ticket-click-orders'):
+        assert key not in bar, key
+    page = _read('jslib/src/desk/chart-page.ts')
     assert "'ticket_order'" in page
-    # 手数取二级报价 ✓
+    # 手数取二级报价 / 下单框 ✓
     assert 'const qty = this.ticket?.qtyValue() || this.orderQty' in page
     ticket = _read('jslib/src/desk/replay-ticket.ts')
     assert 'qtyValue' in ticket

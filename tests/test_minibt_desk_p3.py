@@ -199,13 +199,14 @@ def test_account_and_switch_commands(tmp_path):
     desk.handle(protocol.encode_command({'cmd': 'account'}))
     assert [_payload(script)['type'] for script in desk.sent] == ['account']
 
+    # ★ 2026-11-05 统一账户：新命令 `set_account_kind {key}`
     desk.sent.clear()
     desk.handle(protocol.encode_command(
-        {'cmd': 'switch_account', 'payload': {'index': 1}}))
+        {'cmd': 'set_account_kind', 'payload': {'key': 'real'}}))
     kinds = [_payload(script)['type'] for script in desk.sent]
-    assert kinds == ['log', 'account']
-    assert desk.account_view().index == 1
-    assert 'H宏源期货' in _payload(desk.sent[0])['text']
+    assert 'log' in kinds and 'account_kind' in kinds
+    assert desk.active_account_key() == 'real'
+    assert 'TqAccount' in _payload(desk.sent[0])['text']
 
 
 def test_push_log_patch(tmp_path):
@@ -226,7 +227,7 @@ def test_p3_assets_built():
     css = (repo / 'pylightcharts' / 'js' / 'desk.css').read_text(encoding='utf-8')
     for key in ('desk-dock', 'desk-dock-cards', 'desk-dock-log'):
         assert key in css, key
-    for key in ('desk-dock', 'switch_account', 'account_action'):
+    for key in ('desk-dock', 'set_account_kind', 'account_action'):
         assert key in script, key
     assert (repo / 'jslib' / 'src' / 'desk' / 'account-dock.ts').is_file()
     app = (repo / 'jslib' / 'src' / 'desk' / 'app.ts').read_text(encoding='utf-8')

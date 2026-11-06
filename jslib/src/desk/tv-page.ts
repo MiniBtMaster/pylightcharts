@@ -83,7 +83,13 @@ export class TvPage {
         this.topButton = document.createElement('button');
         this.topButton.type = 'button';
         this.topButton.className = 'desk-tv-top';
-        this.topButton.textContent = '↑';
+        // ★ 用 **SVG 箭头**（20px、线条更粗）而不是文字 `↑`：
+        //   文字字形大小受字体影响、垂直居中也不稳（用户反馈"箭头太小"✗）
+        this.topButton.innerHTML = (
+            '<svg viewBox="0 0 24 24" width="20" height="20" fill="none"'
+            + ' stroke="currentColor" stroke-width="2.6"'
+            + ' stroke-linecap="round" stroke-linejoin="round">'
+            + '<path d="M12 19V6"/><path d="M6 12l6-6 6 6"/></svg>');
         this.topButton.title = '回到顶部';
         this.topButton.setAttribute('aria-label', '回到顶部');
         this.topButton.addEventListener('click', () => {
@@ -121,9 +127,12 @@ export class TvPage {
             < rect.top + 4;
         const show = scrollable && passedHeader && this.element.scrollTop > 0;
         button.classList.toggle('on', show);
-        if (!show) return;
-        button.style.left = `${Math.round(rect.right - 52)}px`;
-        button.style.top = `${Math.round(rect.bottom - 52)}px`;
+        // ★ 位置交给 CSS（`position: fixed; right/bottom: 22px`）：
+        //   以前按 `getBoundingClientRect()` 算 left/top —— 设置里调过
+        //   **界面缩放**（`ui_zoom ≠ 1`，desk 根节点带 `transform: scale()`）时，
+        //   `position: fixed` 的定位基准是**那个被缩放过的根节点**，
+        //   视口坐标再被缩放一次 → 圆钮跑到窗口右下角外面被切掉一半 ✗
+        //   （用户实测 2026-11-03：按钮没有完全显示）
     }
 
     // ------------------------------------------------------------ 生命周期
