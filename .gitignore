@@ -1,0 +1,179 @@
+# ============================================================================
+# pylightcharts —— GitHub 仓库忽略规则（.gitignore）
+#
+# 仓库根 = 本项目（README / pyproject / jslib / pylightcharts / tests / scripts /
+# .github / docs / examples …）。兄弟工程（minibt / miniqt / tutorials /
+# minibt_docs / futu / qtvscode / …）都是**独立仓库**，不随本仓库上传 ✓
+#
+# ⚠ 1. 行尾**不能写注释**：`*.c  # xxx` 会被当成完整通配符 → 永远匹配不上 ✗
+#   2. 只对**未跟踪**文件生效；已提交的路径要先 `git rm -r --cached <路径>`
+#   3. 想让某个文件一定被上传，用 `git check-ignore -v <路径>` 确认没被吃掉
+# ============================================================================
+
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheelhouse/
+pip-wheel-metadata/
+.venv/
+.venv-*/
+venv/
+env/
+.tox/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.whl
+*.tar.gz
+
+# ------------------------------------------------- 编译产物（Cython / C 扩展）
+*.c
+*.pyd
+*.so
+*.dylib
+*.dll
+*.lib
+*.obj
+*.exp
+*.tsbuildinfo
+
+# ------------------------------------------------------ Node / JS 构建产物
+node_modules/
+jslib/dist/
+jslib/typings/
+jslib/coverage/
+jslib/.rollup.cache/
+*.tgz
+
+# ⚠ `pylightcharts/js/*` 是**随 wheel 发布**的前端资源，必须提交！
+#   下面两行是"改成发布时才构建"的开关，默认**保持注释**（否则 CI 的 js
+#   一致性任务拿不到产物，`pip install` 也不带前端 ✗）
+# pylightcharts/js/bundle.js
+# pylightcharts/js/lightweight-charts.js
+
+# ★ desk 打开时会往这个目录**写** qwebchannel.js（运行期生成，随宿主 Qt 版本
+#   变化），不随仓库上传 ✓
+pylightcharts/js/qwebchannel.js
+
+# ---------------------------------------------------------------- 文档产物
+site/
+docs/_build/
+# 文档草稿（下划线开头 = 不发布）
+docs/_*.md
+
+# ------------------------------------------------- 第三方 / 参考源码副本
+reference/
+lightweight-charts/
+lightweight-charts-python/
+lwc-python/
+PyQt-Fluent-Widgets-master/
+
+# ------------------------------------------------- 兄弟工程（独立仓库，不传）
+minibt/
+miniqt/
+minibt_docs/
+tutorials/
+futu/
+qtvscode/
+vscode-minibt/
+/tradingview/
+/design/
+/app/
+
+# ------------------------------------------- 第三方参考副本（不含本仓库代码）
+# `pi-web-main` / `Pi-Agent-Web-main` 是 Pi Agent Web 的上游源码副本（各有自己的
+# LICENSE），只在本地对读，**不随本仓库上传**；`minibt-strategy` 是兄弟仓库 ✓
+pi-web-main/
+Pi-Agent-Web-main/
+minibt-strategy/
+
+# ------------------------------------------------------------ 运行时产物
+*.log
+*.pid
+*.stackdump
+/test/
+/results/
+_diag_*.py
+_tmp_*
+_bundle_current/
+
+# ------------------------------------------------------- 示例演示媒体
+# 只保留 examples/13_panels 的截图（它的 README / 脚本引用这些图）；
+# `examples/**/*.csv` 是**示例数据**，必须上传（别忽略）✓
+examples/**/*.gif
+examples/**/*.png
+examples/**/*.jpg
+examples/**/*.html
+!examples/13_panels/*.png
+
+# ------------------------------------------------- 本地策略 / 个人脚本（含真
+# 实天勤账号，绝不能提交）。官方示例在 examples/、测试在 tests/。
+cci.py
+cci.html
+cci.ipynb
+example_realtime.py
+example_tq_live.py
+strategy_replay.py
+probe_chart.py
+bench_minibt.py
+bench_minibt.html
+test.py
+BtPlot.ipynb
+01_backtest_bokeh.ipynb
+examples/8_headless/chart.html
+examples/8_headless/chart.png
+
+# 根目录只放仓库级文件（README / pyproject / requirements / mkdocs.yml /
+# MANIFEST.in / LICENSE / NOTICE / PROGRESS.md …）；其它根目录下的脚本 /
+# 笔记本 / 截图 / 临时文件一律不入库 ✓
+/*.py
+/*.ipynb
+/*.png
+/*.jpg
+/*.html
+/*.txt
+!/requirements*.txt
+/_*.ps1
+/_*.mjs
+/_*.js
+API_*.md
+
+# 敏感：账号 / 密钥 / 权益文件
+.env
+.env.*
+*.pem
+*.key
+*_secret*
+account_info*
+trade_datas*
+
+# ------------------------------------------------- 个人配置 / 拖进仓库的状态
+desk_personal.json
+tv_groups.json
+tv_state.json
+
+# ------------------------------------------------------ 编辑器 / 系统 / 备份
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.rej
+*.tmp
