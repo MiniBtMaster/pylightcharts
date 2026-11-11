@@ -181,6 +181,7 @@ def test_position_line_label_is_inside_chart():
     page = _read('jslib/src/desk/chart-page.ts')
     assert 'axisLabelVisible: false' in page      # 不再画在价格轴里 ✓
     assert '_addPositionBadge(' in page
-    assert "badge.style.left = '8px'" in page
+    # ★ 预警标签贴在**可视范围**左边（pane 左沿 + 8），不是 host 的 8px ✓
+    assert 'paneRect.left - hostRect.left + 8' in page
     css = _read('jslib/src/desk/desk.css')
     assert '.desk-pos-badge' in css

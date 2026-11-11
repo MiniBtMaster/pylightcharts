@@ -603,7 +603,8 @@ def test_account_switch_routes_chart_and_strategy_live():
     assert 'self._preferred_account_index' in app
     assert '_restart_chart_strategies_for_account' in app
     # 图表策略使用 AccountView 当前账户
-    assert 'account = self.account_view().current()' in app
+    # v1.3.7-67：按**这一页**的账户 key 取实例（多账户不再返回 None ✓）
+    assert 'account = view.instance_for(key) if key else None' in app
     assert 'live=live, api=api, account=account' in app
     # 策略实盘子进程带账户下标 / 实盘凭据
     assert 'MINIBT_TQ_ACCOUNT_INDEX' in live

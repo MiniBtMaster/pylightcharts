@@ -403,9 +403,17 @@ export class IndicatorLayer {
         const paneKeys = new Set(items.filter((item) => !item.overlay)
             .map((item) => item.pane || item.key));
 
-        // ★ `pending`（完整库还在后台算）→ 跳过下面所有“删除”逻辑，
-        //   只把已有的线更新一遍，避免每秒“删了又加”导致副图疯长 ✗
-        if (!keepMissing) {
+        // ★ `pending`（完整库还在后台算）→ **副图不删**（否则每秒删了又加会疯长）；
+        //   但**序列要按 `items + pending_keys` 清理** —— 否则已删掉的指标会一直
+        //   留在图上（用户实测：格 1 还挂个大写 `tqta_MACD`，菜单里又没有 ✗）
+        const pendingKeys = new Set(
+            ((payload as unknown as { pending_keys?: string[] }).pending_keys
+                || []).filter(Boolean));
+        const aliveKeys = new Set(items.map((item) => item.key));
+        if (keepMissing) {
+            for (const key of pendingKeys) aliveKeys.add(key);
+        }
+        {
         // 删掉不再需要的（主图 + 副图）
         for (const [key, series] of this.overlaySeries) {
             if (!overlayKeys.has(key)) {
@@ -416,7 +424,6 @@ export class IndicatorLayer {
                 this._dropLegendRow(key);
             }
         }
-        const aliveKeys = new Set(items.map((item) => item.key));
         for (const key of [...this.legendRows.keys()]) {
             if (!aliveKeys.has(key)) this._dropLegendRow(key);
         }
@@ -454,8 +461,18 @@ export class IndicatorLayer {
         // ★ 以前直接 `removePane(handle.index)`：LWC 在「pane 里的序列被删光」
         //   时会**自己**把空 pane 收掉 → 下标整体前移，再按旧下标删就会删掉
         //   **下一个副图**（用户实测：删第一个副图，另一个跟着消失 ✗）
-        const dropped = [...this.panes.keys()]
-            .filter((pane) => !paneKeys.has(pane));
+        // ★ v1.3.7-109：pending 时也允许删**只剩残留线的副图** ——
+        //   判断标准改看「pane 里的序列是否全都不是本次要的」
+        //   （`aliveKeys` = items + pending_keys），这样被删掉的 `tqta_MACD`
+        //   不会连副图带线一起赖在图上 ✗
+        const dropped = [...this.panes.entries()]
+            .filter(([pane, handle]) => {
+                const keys = [...(handle.series?.keys?.() || [])];
+                const staleOnly = keys.length === 0
+                    || keys.every((key) => !aliveKeys.has(key));
+                return staleOnly || (!keepMissing && !paneKeys.has(pane));
+            })
+            .map(([pane]) => pane);
         dropped.sort((left, right) => this._paneIndex(
             this.panes.get(right) as PaneHandle)
             - this._paneIndex(this.panes.get(left) as PaneHandle));
@@ -463,7 +480,7 @@ export class IndicatorLayer {
             const handle = this.panes.get(pane);
             if (handle) this._removePane(pane, handle);
         }
-        }   // ← end of `if (!keepMissing)`
+        }   // ← 序列清理（panic: pending 时按 items + pending_keys 保留）
 
         void this.theme;
         // ★ 色带必须等**两条线都建好**后再挂 LineFill：
@@ -1490,10 +1507,48 @@ export class IndicatorLayer {
 
     /** 删掉某个**指标**的全部线（`source` = 目录 key；不等后端补丁也行 ✓） */
     removeSource(source: string): void {
+        const base = String(source || '').split(':')[0].toLowerCase();
+        const hit = (key: unknown): boolean =>
+            String(key || '').split(':')[0].toLowerCase() === base;
+        // ★ v1.3.7-109：**先物理删掉注册表里的残留序列**（不管它在不在
+        //   `lastItems` 里）—— 用户实测：图上还挂着一个大写 `tqta_MACD`，
+        //   删除菜单里看不到它，点删除也没反应 ✗
+        let removed = false;
+        for (const [key, series] of [...this.overlaySeries]) {
+            if (!hit(key)) continue;
+            try {
+                this.getMainChart()?.removeSeries(series);
+            } catch { /* ignore */ }
+            this.overlaySeries.delete(key);
+            this._dropLegendRow(key);
+            removed = true;
+        }
+        for (const [paneKey, handle] of [...this.panes]) {
+            for (const [key, series] of [...handle.series]) {
+                if (!hit(key)) continue;
+                try {
+                    this.getMainChart()?.removeSeries(series as never);
+                } catch { /* ignore */ }
+                handle.series.delete(key);
+                this._dropLegendRow(key);
+                removed = true;
+            }
+            if (!handle.series.size) {
+                this.panes.delete(paneKey);
+                this._removePane(paneKey, handle);
+            }
+        }
+        for (const key of [...this.legendRows.keys()]) {
+            if (hit(key)) this._dropLegendRow(key);
+        }
         const keep = this.lastItems.filter((item) =>
-            (item.source || String(item.key).split(':')[0]) !== source);
-        if (keep.length === this.lastItems.length) return;
-        this.apply({ type: 'indicator', symbol: '', items: keep });
+            !hit(item.source || item.key));
+        if (keep.length !== this.lastItems.length) {
+            this.apply({ type: 'indicator', symbol: '', items: keep });
+        } else if (removed) {
+            // 后端列表里本来就没有它 → 只清理残留，不用再 apply ✓
+            this.lastItems = keep;
+        }
     }
 
     clear(): void {

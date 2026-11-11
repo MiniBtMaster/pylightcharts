@@ -16,6 +16,12 @@ export const ICON_TRASH = wrap(
     '<path d="M3 6h18"/><path d="M8 6V4h8v2"/>'
     + '<path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/>');
 
+/** ⤵ 把会话摘要合并到当前会话（pi-agent-web 的 merge 图标 ✓） */
+export const ICON_MERGE = wrap(
+    '<path d="M4 7h7a3 3 0 0 1 3 3v7"/>'
+    + '<path d="M14 17l-3-3M14 17l3-3"/>'
+    + '<path d="M4 12h4"/><path d="M4 17h4"/>');
+
 /** 🧹 清除画线（橡皮擦） */
 export const ICON_ERASER = wrap(
     '<path d="M7 21h10"/><path d="M5 15l6-6a2 2 0 0 1 2.8 0l3.2 3.2a2 2 0 0 1 0 2.8'

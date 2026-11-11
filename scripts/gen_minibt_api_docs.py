@@ -54,10 +54,15 @@ PAGES: dict[str, list[str]] = {
         'LocalDatas', 'KLine', 'IndFrame', 'IndSeries', 'Line', 'SeriesType',
         'FILED', 'StockApi', 'StockTargetPosTask',
     ],
-    '03_custom_indicators.md': ['BtIndicator', 'Stop', 'stop_callback'],
+    '03_custom_indicators.md': [
+        'BtIndicator', 'Stop', 'stop_callback',
+        # v1.3.7-73：信号（技术分析 / 圆点 / 预警共用 ✓）
+        'Signal', 'Threshold', 'Compare', 'Osc', 'Trend', 'Custom',
+    ],
     '04_indicator_libs.md': [
         'PandasTa', 'TaLib', 'TuLip', 'FinTa', 'BtInd', 'Pine',
-        'TqTa', 'TqFunc', 'TradingView', 'Pair', 'Factors', 'CoreIndicators',
+        'TqTa', 'TqFunc', 'TradingView', 'RollingVolumeProfile', 'Pair',
+        'Factors', 'CoreIndicators',
     ],
     '05_order_and_stop.md': [
         'OrderType', 'SizeType', 'CommissionType', 'TradeTimeFilter', 'BtStop',

@@ -78,8 +78,12 @@ def test_suite_pages_send_commands_not_dom_side_effects():
     for command in ('workbench_submit', 'workbench_limits',
                     'workbench_reconcile', 'research_start',
                     'datahub_resample', 'datahub_query',
-                    'ops_token_issue', 'ops_notify_test'):
+                    'ops_token_issue'):
         assert f"'{command}'" in pages, command
+    # ★ v1.3.7-91：告警通道搬到设置页 → 这两个命令在那里发 ✓
+    settings = _read(JSLIB / 'settings-page.ts')
+    for command in ('ops_notify_config', 'ops_notify_test'):
+        assert f"'{command}'" in settings, command
     for marker in ('metric0', 'metric1', 'metric2', 'rs-data-names',
                    'heatMetric', 'LocalDatas'):
         assert marker in pages, marker

@@ -144,4 +144,5 @@ def test_frontend_templates_sent_to_every_chart_page():
     assert 'page instanceof ChartPage' in block
     assert 'page instanceof LocalChartPage' in block
     # 新建本地图表页时主动拉一次（右键菜单立刻能用 ✓）
-    assert app.count("this.send('templates', {});") >= 2
+    # v1.3.7-67：开图不再同步发，改为延后发送（`_deferCommands`）✓
+    assert app.count("['templates', {}, ") >= 2

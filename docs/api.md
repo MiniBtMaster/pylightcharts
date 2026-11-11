@@ -188,7 +188,7 @@ Creates a Bar series through the generic bridge.
 
 Creates a Baseline series through the generic bridge.
 
-#### `create_histogram(self, name: str = '', color: str = 'rgba(214, 237, 255, 0.6)', price_line: bool = True, price_label: bool = True, scale_margin_top: float = 0.0, scale_margin_bottom: float = 0.0, legend_toggle: bool = True, legend: bool = True) -> pylightcharts.abstract.Histogram`
+#### `create_histogram(self, name: str = '', color: str = 'rgba(214, 237, 255, 0.6)', price_line: bool = True, price_label: bool = True, scale_margin_top: float = 0.0, scale_margin_bottom: float = 0.0, legend_toggle: bool = True, legend: bool = True, base: Optional[float] = None) -> pylightcharts.abstract.Histogram`
 
 Creates and returns a Histogram object.
 
@@ -984,7 +984,7 @@ Creates a Bar series through the generic bridge.
 
 Creates a Baseline series through the generic bridge.
 
-#### `create_histogram(self, name: str = '', color: str = 'rgba(214, 237, 255, 0.6)', price_line: bool = True, price_label: bool = True, scale_margin_top: float = 0.0, scale_margin_bottom: float = 0.0, legend_toggle: bool = True, legend: bool = True) -> pylightcharts.abstract.Histogram`
+#### `create_histogram(self, name: str = '', color: str = 'rgba(214, 237, 255, 0.6)', price_line: bool = True, price_label: bool = True, scale_margin_top: float = 0.0, scale_margin_bottom: float = 0.0, legend_toggle: bool = True, legend: bool = True, base: Optional[float] = None) -> pylightcharts.abstract.Histogram`
 
 Creates and returns a Histogram object.
 
@@ -5814,6 +5814,10 @@ Return `frame` with per-point colours applied where `condition` holds.
 #### `condition_mask(frame: pandas.core.frame.DataFrame, condition, time_column: str = 'time') -> numpy.ndarray`
 
 Turn a `condition` (Series / array / callable) into a boolean array.
+
+#### `normalize_color(color)`
+
+把颜色规范成**引擎认识的写法**：`rgba()` 的 alpha 一律 0~1 ✓
 
 ## Themes (`pylightcharts.themes`)
 

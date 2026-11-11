@@ -78,6 +78,8 @@ function shell(kind: string, theme: DeskTheme, title: string,
 interface PageOptions {
     theme: DeskTheme;
     onCommand: (cmd: string, payload?: unknown) => void;
+    /** 轻提示（可选；运维页新建任务校验用 ✓ v1.3.7-79） */
+    onToast?: (kind: string, text: string) => void;
 }
 
 // ================================================================ 交易工作台
@@ -974,6 +976,952 @@ export class DataPage {
     }
 }
 
+// ================================================================ 告警中心
+/** 告警中心（v1.3.7-97）：命中的告警做成**时间轴列表**，能回看 / 搜索 / 筛选 ✓
+ *
+ * 数据源：`ops.AlertLog`（SQLite `alerts_log.db`，保留 180 天）；
+ * 每条包含 时间 / 等级 / 规则 / 标题 / 正文 / 发到哪些通道（含被静默压制的）。
+ */
+export class AlertLogPage {
+    public readonly element: HTMLDivElement;
+    private readonly options: PageOptions & {
+        /** 一键复现：打开某个合约的图表 ✓ v1.3.7-98 */
+        onOpen?: (symbol: string) => void;
+    };
+    private theme: DeskTheme;
+    private items: Array<Record<string, any>> = [];
+    private stats: Record<string, any> = {};
+    private catalog: Array<Record<string, any>> = [];
+    private queryText = '';
+    private level = '';
+    private rule = '';
+    private total = 0;
+    private limit = 60;
+    private daily: Array<Record<string, any>> = [];
+
+    constructor(options: AlertLogPage['options']) {
+        this.options = options;
+        this.theme = options.theme;
+        this.element = shell('alertlog', this.theme, '告警中心',
+            '所有命中过的告警（含被静默压制的）：按时间倒序，可搜索 / 按等级或规则筛选。'
+            + '记录保留 180 天。',
+            this.skeleton());
+        this.element.addEventListener('click', (event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest('[data-log-refresh]')) {
+                this.reload();
+                return;
+            }
+            if (target.closest('[data-log-clear]')) {
+                this.options.onCommand('ops_alert_log_clear', {});
+                return;
+            }
+            if (target.closest('[data-log-more]')) {
+                this.limit += 60;
+                this.reload();
+            }
+            // ★ 一键复现：点「打开图表」或整行 → 打开该合约 ✓
+            const open = target.closest<HTMLElement>('[data-log-open]');
+            if (open) {
+                this.options.onOpen?.(String(open.dataset.logOpen || ''));
+                return;
+            }
+            const row = target.closest<HTMLElement>('[data-log-row-symbol]');
+            if (row) {
+                this.options.onOpen?.(
+                    String(row.dataset.logRowSymbol || ''));
+            }
+        });
+        this.element.addEventListener('change', (event) => {
+            const target = event.target as HTMLInputElement;
+            if (target.matches('[data-log-level]')) {
+                this.level = String(target.value || '');
+                this.reload();
+            }
+            if (target.matches('[data-log-rule]')) {
+                this.rule = String(target.value || '');
+                this.reload();
+            }
+        });
+        this.element.addEventListener('input', (event) => {
+            const target = event.target as HTMLInputElement;
+            if (!target.matches('[data-log-query]')) return;
+            this.queryText = String(target.value || '');
+            // 输入即搜（后端 LIKE，很轻）；节流 300ms 防连打 ✓
+            window.clearTimeout(this._timer);
+            this._timer = window.setTimeout(() => this.reload(), 300);
+        });
+        this.reload();
+    }
+
+    private _timer = 0;
+
+    show(): void { this.element.style.display = 'block'; }
+    hide(): void { this.element.style.display = 'none'; }
+    applyTheme(theme: DeskTheme): void {
+        this.theme = theme;
+        this.element.className = `desk-suite-page desk-suite-alertlog theme-${theme}`;
+        this.render();
+    }
+
+    private skeleton(): string {
+        return `
+        <div class="desk-suite-card">
+            <div class="desk-suite-form">
+                <label class="wide">搜索（标题 / 正文 / 规则）<input data-log-query placeholder="例如：拒单 / 保证金 / SHFE.ag"></label>
+                <label>等级<select data-log-level>
+                    <option value="">全部</option>
+                    <option value="error">严重</option>
+                    <option value="warning">重要</option>
+                    <option value="info">一般</option>
+                </select></label>
+                <label>规则<select data-log-rule>
+                    <option value="">全部</option>
+                </select></label>
+            </div>
+            <div class="desk-suite-buttons">
+                <button class="desk-tool primary" data-log-refresh>刷新</button>
+                <button class="desk-tool danger" data-log-clear>清空记录</button>
+                <span class="desk-suite-hint" id="op-log-stats"></span>
+            </div>
+            <div class="desk-suite-hint">近 14 天（柱高 = 条数，颜色 = 等级）</div>
+            <div id="op-log-daily"></div>
+            <div id="op-log-list"></div>
+        </div>`;
+    }
+
+    apply(patch: Record<string, any>): void {
+        if (patch.type !== 'ops_alert_log') return;
+        this.items = (patch.items || []) as Array<Record<string, any>>;
+        this.stats = patch.stats || {};
+        if (Array.isArray(patch.daily)) this.daily = patch.daily;
+        this.total = Number(patch.total || 0);
+        if (Array.isArray(patch.catalog) && patch.catalog.length) {
+            this.catalog = patch.catalog;
+        }
+        this.render();
+    }
+
+    private reload(): void {
+        this.options.onCommand('ops_alert_log', {
+            query: this.queryText, level: this.level, rule: this.rule,
+            limit: this.limit, offset: 0,
+        });
+    }
+
+    private render(): void {
+        const ruleSelect = this.element
+            .querySelector<HTMLSelectElement>('[data-log-rule]');
+        if (ruleSelect) {
+            const keep = this.rule;
+            ruleSelect.innerHTML = '<option value="">全部</option>'
+                + this.catalog.map((row) => `<option value="${esc(row.id)}">${
+                    esc(row.label || row.id)}（${esc(row.source || '')}）`
+                    + '</option>').join('');
+            ruleSelect.value = keep;
+        }
+        const statsBox = this.element.querySelector('#op-log-stats');
+        if (statsBox) {
+            const byLevel = (this.stats.by_level || {}) as Record<string, number>;
+            statsBox.textContent = `共 ${this.stats.total || 0} 条`
+                + `　今天 ${this.stats.today || 0} 条`
+                + `　严重 ${byLevel.error || 0} / 重要 ${byLevel.warning || 0}`
+                + ` / 一般 ${byLevel.info || 0}`;
+        }
+        this.renderDaily();
+        const box = this.element.querySelector('#op-log-list');
+        if (!box) return;
+        if (!this.items.length) {
+            box.innerHTML = '<div class="desk-suite-empty">还没有告警记录'
+                + '（规则命中后才会出现；去「设置 → 告警通道」看看开关）</div>';
+            return;
+        }
+        // 按天分组 → 时间轴（v1.3.7-97 ✓）
+        const groups = new Map<string, Array<Record<string, any>>>();
+        for (const row of this.items) {
+            const day = this._day(row.ts);
+            if (!groups.has(day)) groups.set(day, []);
+            groups.get(day)!.push(row);
+        }
+        let html = '';
+        for (const [day, rows] of groups) {
+            html += `<div class="desk-log-day">${esc(day)}`
+                + `<span class="desk-muted">（${rows.length} 条）</span></div>`;
+            for (const row of rows) {
+                const level = String(row.level || 'info');
+                const mark = level === 'error' ? '严重'
+                    : (level === 'warning' ? '重要' : '一般');
+                const time = new Date(Number(row.ts || 0) * 1000)
+                    .toLocaleTimeString('zh-CN', { hour12: false });
+                const channel = String(row.channel || '');
+                const failed = row.ok === false ? ' fail' : '';
+                const symbol = String(row.symbol || '');
+                html += `<div class="desk-log-row ${level}${failed}"${
+                    symbol ? ` data-log-row-symbol="${esc(symbol)}"`
+                        + ' title="点击打开这个合约的图表"' : ''}>
+                    <span class="desk-log-time">${esc(time)}</span>
+                    <span class="desk-log-badge ${level}">${mark}</span>
+                    <div class="desk-log-text">
+                        <div class="desk-log-title">${esc(row.title || '')}</div>
+                        ${row.text ? `<div class="desk-log-detail">${
+                            esc(row.text)}</div>` : ''}
+                        <div class="desk-log-meta">${esc(row.rule || '')}
+                        ${channel ? `　·　${esc(channel)}` : ''}
+                        ${symbol ? `　·　<button class="desk-suite-link"
+                            data-log-open="${esc(symbol)}">打开图表 ${
+                            esc(symbol)}</button>` : ''}</div>
+                    </div>
+                </div>`;
+            }
+        }
+        if (this.items.length < this.total) {
+            html += `<div class="desk-suite-buttons">
+                <button class="desk-tool" data-log-more>加载更多（还有 ${
+                    this.total - this.items.length} 条）</button></div>`;
+        }
+        box.innerHTML = html;
+    }
+
+    /** 近 14 天柱状图（按等级堆叠 + 数字；纯 DOM，跟主题走 ✓） */
+    private renderDaily(): void {
+        const box = this.element.querySelector('#op-log-daily');
+        if (!box) return;
+        const rows = this.daily || [];
+        if (!rows.length) {
+            box.innerHTML = '<div class="desk-suite-hint">还没有数据</div>';
+            return;
+        }
+        const max = Math.max(1, ...rows.map((row) => Number(row.total || 0)));
+        box.innerHTML = '<div class="desk-log-bars">'
+            + rows.map((row) => {
+                const total = Number(row.total || 0);
+                const height = Math.round(total / max * 84);
+                const parts: Array<[string, number]> = [
+                    ['error', Number(row.error || 0)],
+                    ['warning', Number(row.warning || 0)],
+                    ['info', Number(row.info || 0)]];
+                const stack = parts.filter((item) => item[1] > 0)
+                    .map((item) => {
+                        const seg = Math.max(2, Math.round(
+                            item[1] / Math.max(1, total) * height));
+                        return `<span class="seg ${item[0]}" style="height:${
+                            seg}px"></span>`;
+                    }).join('');
+                const day = String(row.day || '').slice(5);
+                return `<div class="desk-log-bar" title="${
+                    esc(String(row.day || ''))}：共 ${total} 条（严重 ${
+                    Number(row.error || 0)} / 重要 ${Number(row.warning || 0)}`
+                    + ` / 一般 ${Number(row.info || 0)}）">
+                    <div class="bar-stack" style="height:${
+                        Math.max(height, total ? 3 : 0)}px">${stack}</div>
+                    <div class="bar-count">${total || ''}</div>
+                    <div class="bar-day">${esc(day)}</div>
+                </div>`;
+            }).join('') + '</div>';
+    }
+
+    private _day(ts: number): string {
+        const date = new Date(Number(ts || 0) * 1000);
+        return date.toLocaleDateString('zh-CN');
+    }
+}
+
+// ================================================================ 定时任务
+/** 定时任务（v1.3.7-88 从运维页独立出来 ✓）
+ *
+ * 触发（每 N 秒 / 每天 HH:MM / 前置任务成功后 / 仅手动）·
+ * 动作（MCP 工具 / 多步串联 / AI 提示词 / 内置）· 保护（重试 / 补跑 / 推送 /
+ * 休市日 / 交易时段）· 模板库 / 导入导出 / 执行历史 / 帮助面板。
+ */
+export class SchedulePage {
+    public readonly element: HTMLDivElement;
+    private readonly options: PageOptions;
+    private theme: DeskTheme;
+    private data: Record<string, any> = {};
+
+    constructor(options: PageOptions) {
+        this.options = options;
+        this.theme = options.theme;
+        this.element = shell('schedule', this.theme, '定时任务',
+            '定时把 MCP 工具 / AI 提示词 / 内置任务跑起来：每 N 秒、每天某时刻，'
+            + '或「前置任务成功之后」。失败可重试、可推送微信 / 邮件。',
+            this.skeleton());
+        this.element.addEventListener('click', (event) => {
+            this.onClick(event);
+        });
+        // 选「动作 / 触发」时切换对应字段 ✓
+        this.element.addEventListener('change', (event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest('[data-op="taskAction"]')
+                    || target.closest('[data-op="taskTrigger"]')) {
+                this.syncTaskForm();
+            }
+            // ★ v1.3.7-86：选工具 → 参数框填骨架 + 下面显示参数说明 ✓
+            if (target.closest('[data-op="taskTool"]')) {
+                this.fillToolSkeleton();
+            }
+            if (target.closest('[data-op="taskBuiltin"]')) {
+                this.renderBuiltinDoc();
+            }
+        });
+    }
+
+    show(): void { this.element.style.display = 'block'; }
+    hide(): void { this.element.style.display = 'none'; }
+    applyTheme(theme: DeskTheme): void {
+        this.theme = theme;
+        this.element.className = `desk-suite-page desk-suite-schedule theme-${theme}`;
+    }
+
+    private skeleton(): string {
+        return `
+        <div class="desk-suite-grid">
+            <section class="desk-suite-card">
+                <h3>定时任务 <span class="desk-suite-hint" style="font-weight:400">（每 N 秒 / 每天 HH:MM；动作 = MCP 工具 / AI 提示词 / 内置）</span></h3>
+                <div class="desk-suite-form">
+                    <label>名称<input data-op="taskName" placeholder="开盘简报"></label>
+                    <label>动作<select data-op="taskAction">
+                        <option value="tool">调 MCP 工具</option>
+                        <option value="sequence">多步串联</option>
+                        <option value="ai">发给 AI</option>
+                        <option value="builtin">内置任务</option>
+                    </select></label>
+                    <label class="task-tool">工具<select data-op="taskTool"></select></label>
+                    <label class="wide task-tool">工具参数（JSON：{"tool":"…","args":{…}}）<input data-op="taskArgs" placeholder='{"tool":"desk_news","args":{"refresh":true}}'></label>
+                    <div class="wide task-tool desk-suite-doc" id="op-task-tool-doc"></div>
+                    <div class="wide task-builtin desk-suite-doc" id="op-task-builtin-doc"></div>
+                    <label class="wide task-seq">步骤（JSON 数组）<textarea data-op="taskSteps" rows="3" placeholder='[{"tool":"desk_news","args":{"refresh":true}},{"tool":"desk_calendar","args":{"days":2}}]'></textarea></label>
+                    <label class="wide task-ai">提示词<input data-op="taskPrompt" placeholder="汇总自选与持仓 + 隔夜资讯，给今日关注点"></label>
+                    <label class="task-builtin">内置<select data-op="taskBuiltin"></select></label>
+                    <label>触发<select data-op="taskTrigger">
+                        <option value="interval">每 N 秒</option>
+                        <option value="daily">每天某时刻</option>
+                        <option value="after">前置任务成功后</option>
+                        <option value="manual">仅手动</option>
+                    </select></label>
+                    <label class="wide task-after">前置任务（逗号分隔，全部成功后跑）<input data-op="taskAfter" placeholder="资讯刷新,收盘复盘"></label>
+                    <label class="wide task-depends">前置依赖（定时任务要求它们最近成功过）<input data-op="taskDepends" placeholder="资讯刷新"></label>
+                    <label class="task-interval">间隔（秒）<input data-op="taskInterval" type="number" value="300"></label>
+                    <label class="task-daily">时刻（HH:MM）<input data-op="taskAt" value="08:55" placeholder="08:55"></label>
+                    <label class="task-daily">周几<select data-op="taskDays">
+                        <option value="mon-fri">周一到周五</option>
+                        <option value="everyday">每天</option>
+                        <option value="weekend">周末</option>
+                    </select></label>
+                    <label class="inline"><input type="checkbox" data-op="taskEnabled"> 建好就启用</label>
+                    <label class="inline"><input type="checkbox" data-op="taskSkipHoliday" checked> 跳过休市日</label>
+                    <label class="inline"><input type="checkbox" data-op="taskSession"> 只在交易时段</label>
+                    <label>失败重试<select data-op="taskRetries">
+                        <option value="0">不重试</option>
+                        <option value="1">1 次</option>
+                        <option value="2">2 次</option>
+                    </select></label>
+                    <label>结果推送<select data-op="taskNotify">
+                        <option value="error">只在失败时推送</option>
+                        <option value="always">成功也推送</option>
+                        <option value="never">不推送</option>
+                    </select></label>
+                    <label class="inline"><input type="checkbox" data-op="taskCatchUp"> 停机后补跑（6 小时内）</label>
+                    <label class="inline task-ai"><input type="checkbox" data-op="taskWrite"> 允许 AI 改界面</label>
+                    <label class="inline task-tool"><input type="checkbox" data-op="taskDanger"> 允许危险工具（下单/实盘）</label>
+                    <label class="wide task-when">前置条件（JSON，可选）<input data-op="taskWhen" placeholder='{"tool":"desk_positions","path":"positions","op":"count","cmp":">","value":0}'></label>
+                </div>
+                <div class="desk-suite-buttons">
+                    <button class="desk-tool primary" data-op-task-add>添加</button>
+                    <button class="desk-tool" data-op-task-reset>清空表单</button>
+                    <button class="desk-tool" data-op-task-run>立即跑到期任务</button>
+                    <button class="desk-tool" data-op-holiday>标记 / 取消今天休市</button>
+                    <button class="desk-tool" data-op-task-help title="看可用工具 / 内置任务的说明与使用场景">帮助 ?</button>
+                    <select class="desk-tool" data-op="taskTemplate" title="从模板新建">
+                        <option value="">从模板新建…</option>
+                    </select>
+                    <button class="desk-tool" data-op-task-template>用模板</button>
+                    <button class="desk-tool" data-op-tasks-export>导出任务</button>
+                    <button class="desk-tool" data-op-tasks-import>导入任务</button>
+                </div>
+                <div id="op-tasks"></div>
+                <div id="op-task-history"></div>
+                <div id="op-holidays"></div>
+            </section>
+        </div>`;
+    }
+
+    private input(name: string): HTMLInputElement | HTMLSelectElement | null {
+        return this.element.querySelector(
+            `[data-op="${name}"]`) as HTMLInputElement | HTMLSelectElement | null;
+    }
+
+    private value(name: string): string {
+        return String(this.input(name)?.value ?? '').trim();
+    }
+
+    private checked(name: string): boolean {
+        return !!(this.input(name) as HTMLInputElement | null)?.checked;
+    }
+
+    private onClick(event: MouseEvent): void {
+        const target = event.target as HTMLElement;
+        if (target.closest('[data-op-task-add]')) {
+            const payload = this.taskPayload();
+            if (!payload.name) {
+                this.options.onToast?.('warning', '先给任务起个名字');
+                return;
+            }
+            this.options.onCommand(this.editingTask ? 'ops_task_update'
+                : 'ops_task_add', payload);
+            this.editingTask = '';
+            return;
+        }
+        if (target.closest('[data-op-task-reset]')) {
+            this.resetTaskForm();
+            return;
+        }
+        if (target.closest('[data-op-task-run]')) {
+            this.options.onCommand('ops_task_run', {});
+            return;
+        }
+        if (target.closest('[data-op-holiday]')) {
+            this.options.onCommand('ops_holidays', { action: 'toggle' });
+            return;
+        }
+        if (target.closest('[data-op-tasks-import]')) {
+            this.options.onCommand('ops_task_import', {});
+            return;
+        }
+        if (target.closest('[data-op-task-help]')) {
+            this.openHelp();
+            return;
+        }
+        if (target.closest('[data-op-task-template]')) {
+            const template = this.value('taskTemplate');
+            if (!template) {
+                this.options.onToast?.('warning', '先选一个模板');
+                return;
+            }
+            this.options.onCommand('ops_task_template', { template });
+            return;
+        }
+        if (target.closest('[data-op-tasks-export]')) {
+            this.options.onCommand('ops_task_export', {});
+            return;
+        }
+        const editTask = target.closest<HTMLElement>('[data-op-task-edit]');
+        if (editTask) {
+            this.editTask(editTask.dataset.opTaskEdit || '');
+            return;
+        }
+        const execTask = target.closest<HTMLElement>('[data-op-task-exec]');
+        if (execTask) {
+            this.options.onCommand('ops_task_run',
+                { name: execTask.dataset.opTaskExec || '' });
+            return;
+        }
+        const toggle = target.closest<HTMLElement>('[data-op-task-toggle]');
+        if (toggle) {
+            this.options.onCommand('ops_task_toggle', {
+                name: toggle.dataset.opTaskToggle || '',
+                enabled: toggle.dataset.enabled !== '1',
+            });
+            return;
+        }
+        const drop = target.closest<HTMLElement>('[data-op-task-remove]');
+        if (drop) {
+            this.options.onCommand('ops_task_remove',
+                { name: drop.dataset.opTaskRemove || '' });
+        }
+    }
+
+    apply(patch: Record<string, any>): void {
+        const type = String(patch.type || '');
+        if (type === 'ops_task_export') {
+            this.download('desk-tasks.json', String(patch.json || ''));
+            this.options.onToast?.('success',
+                `已导出 ${patch.count || 0} 个任务`);
+            return;
+        }
+        if (type === 'ops_task_import_result') {
+            const lines = [`新增 ${(patch.added || []).length} 个`,
+                `跳过 ${(patch.skipped || []).length} 个`];
+            if ((patch.failed || []).length) {
+                lines.push(`失败 ${patch.failed.length} 个：${
+                    (patch.failed || []).join('；')}`);
+            }
+            this.options.onToast?.((patch.failed || []).length ? 'warning'
+                : 'success', lines.join('，'));
+            return;
+        }
+        if (type === 'ops_catalog') {
+            this.catalog = { tools: patch.tools || [],
+                             builtins: patch.builtins || [] };
+            const kind = this.value('taskAction');
+            if (kind === 'tool') this.fillToolSkeleton();
+            if (kind === 'builtin') this.renderBuiltinDoc();
+            return;
+        }
+        if (type === 'ops_task_output') {
+            const box = this.element.querySelector('#op-task-history');
+            if (box) {
+                box.insertAdjacentHTML('afterbegin',
+                    `<div class="desk-suite-hint">${esc(patch.name || '')}`
+                    + ` 的输出：<pre class="desk-suite-output">${
+                        esc(String(patch.text || '').slice(0, 4000))}</pre></div>`);
+            }
+            return;
+        }
+        if (type === 'ops_holidays') {
+            if (patch.tasks) this.data.tasks = patch.tasks;
+            this.data.holidays = patch.days || [];
+            this.renderHolidays();
+            if (patch.tasks) this.renderTasks();
+            return;
+        }
+        if (type === 'ops_tasks') {
+            this.data.tasks = patch.tasks;
+            this.renderTasks();
+            const results = (patch.results || []) as Array<Record<string, any>>;
+            const box = this.element.querySelector('#op-tasks');
+            if (box && results.length) {
+                box.insertAdjacentHTML('afterbegin', `<div class="desk-suite-hint">${
+                    results.map((row) => `${esc(row.name)}: ${
+                        row.ok ? 'OK' : '失败 ' + esc(row.error)}`).join('；')
+                }</div>`);
+            }
+        }
+    }
+
+    private download(name: string, body: string): void {
+        const blob = new Blob([body], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    private renderTasks(): void {
+        const data = this.data.tasks || {};
+        const tasks = (data.tasks || []) as Array<Record<string, any>>;
+        const box = this.element.querySelector('#op-tasks');
+        if (box) {
+            box.innerHTML = (data.enabled === false
+                ? '<div class="desk-suite-hint warn">定时任务总开关是关的'
+                  + '（设置 → 定时任务），任何任务都不会跑</div>' : '')
+                + '<div class="desk-suite-table-wrap">'
+                + table(['名称', '动作', '触发', '前置条件', '下次', '上次', '状态', '操作'],
+                    tasks.map((row) => [
+                        esc(row.name || ''), esc(this.taskActionText(row)),
+                        esc(this.taskTriggerText(row)),
+                        esc(this.whenText(row)),
+                        row.enabled ? when(row.next_run) : '—',
+                        row.last_run ? when(row.last_run) : '—',
+                        // ★ v1.3.7-87：状态列只放**短文本**（长原因进 title），
+                        //   否则整张表被撑到页面外 ✗
+                        row.enabled
+                            ? (row.last_status === 'error'
+                                ? `<span class="desk-suite-state warn" title="${esc(row.last_error || '')}">失败</span>`
+                                : (row.last_status === 'skipped'
+                                    ? `<span class="muted" title="${esc(row.last_error || '')}">跳过</span>`
+                                    : `<span class="desk-suite-state live">${esc(row.last_status || '待运行')}</span>`))
+                            : `<span class="muted" title="${esc((row.disabled_reason || '') + ' ｜ ' + this.taskGuardText(row))}">已停用</span>`,
+                        `<button class="desk-suite-link" data-op-task-exec="${esc(row.name)}">立即跑</button>
+                 <button class="desk-suite-link" data-op-task-edit="${esc(row.name)}">编辑</button>
+                 <button class="desk-suite-link" data-op-task-toggle="${esc(row.name)}" data-enabled="${row.enabled ? '1' : '0'}">${row.enabled ? '停用' : '启用'}</button>
+                 <button class="desk-suite-link" data-op-task-remove="${esc(row.name)}">删除</button>`,
+                    ]), '还没有任务')
+                + '</div>';
+        }
+        const toolSelect = this.input('taskTool') as HTMLSelectElement | null;
+        if (toolSelect && !toolSelect.options.length) {
+            // ★ 后端快照带 tools；万一没带（老版本 / 别处的补丁）→ 用目录兜底 ✓
+            const names = (data.tools && data.tools.length)
+                ? data.tools
+                : ((this.catalog.tools || []) as Array<Record<string, any>>)
+                    .map((row) => row.name);
+            toolSelect.innerHTML = names
+                .map((name: string) => `<option value="${esc(name)}">${esc(name)}</option>`)
+                .join('');
+        }
+        const templateSelect = this.input('taskTemplate') as HTMLSelectElement | null;
+        if (templateSelect && templateSelect.options.length <= 1) {
+            templateSelect.innerHTML = '<option value="">从模板新建…</option>'
+                + (data.templates || []).map((row: Record<string, any>) =>
+                    `<option value="${esc(row.name)}" title="${esc(row.desc || '')}">${
+                        esc(row.name)}</option>`).join('');
+        }
+        const builtinSelect = this.input('taskBuiltin') as HTMLSelectElement | null;
+        if (builtinSelect && !builtinSelect.options.length) {
+            builtinSelect.innerHTML = (data.builtins || [])
+                .map((name: string) => `<option value="${esc(name)}">${esc(name)}</option>`)
+                .join('');
+        }
+        this.syncTaskForm();
+        this.renderTaskHistory();
+        this.renderHolidays();
+        if (!this.catalogReady()) this.options.onCommand('ops_catalog', {});
+        else {
+            const kind = this.value('taskAction');
+            if (kind === 'tool' && !this.value('taskArgs')) {
+                this.fillToolSkeleton();
+            }
+            if (kind === 'builtin') this.renderBuiltinDoc();
+        }
+    }
+
+    /** 目录（工具说明 / 参数 / 内置任务说明）由后端 `ops_catalog` 推一次 ✓ */
+    private catalog: Record<string, any> = { tools: [], builtins: [] };
+
+    private catalogReady(): boolean {
+        return !!((this.catalog.tools || []).length);
+    }
+
+    private toolRow(name: string): Record<string, any> | null {
+        return ((this.catalog.tools || []) as Array<Record<string, any>>)
+            .find((row) => row.name === name) || null;
+    }
+
+    /** 选工具 → 参数框填「全部参数 + 默认值」的骨架 ✓ */
+    private fillToolSkeleton(): void {
+        const name = this.value('taskTool');
+        const box = this.input('taskArgs');
+        const doc = this.element.querySelector('#op-task-tool-doc');
+        const row = this.toolRow(name);
+        if (box && row?.skeleton) box.value = String(row.skeleton);
+        if (!doc) return;
+        if (!row) {
+            doc.innerHTML = this.catalogReady() ? ''
+                : '<span class="muted">正在读取工具说明…</span>';
+            return;
+        }
+        const params = (row.params || []) as Array<Record<string, any>>;
+        // ★ v1.3.7-94：名字一行、说明一行、每个参数两行（上下布局）；
+        //   以前名字和解释挤在同一行，解释一长就完全没法看 ✗
+        doc.innerHTML = `<div class="desk-suite-doc-head">${esc(row.name)}</div>`
+            + `<div class="desk-suite-doc-line">${
+                esc(row.description || '')}</div>`
+            + (params.length
+                ? params.map((item) => {
+                    const def = item.default === '' || item.default === null
+                        || item.default === undefined
+                        ? '无默认（填空串）'
+                        : `默认 ${JSON.stringify(item.default)}`;
+                    return '<div class="desk-suite-doc-line">'
+                        + `<code>${esc(item.name)}</code> `
+                        + `<span class="muted">${esc(item.type || '')}`
+                        + `${item.required ? ' · 必填' : ''}`
+                        + ` · ${esc(def)}</span>`
+                        + `<br>${esc(item.description || '')}</div>`;
+                }).join('')
+                : '<div class="desk-suite-doc-line muted">这个工具不需要参数，'
+                  + '直接 {"tool":"' + esc(row.name) + '","args":{}} 就行</div>');
+    }
+
+    private renderBuiltinDoc(): void {
+        const doc = this.element.querySelector('#op-task-builtin-doc');
+        if (!doc) return;
+        const name = this.value('taskBuiltin');
+        const row = ((this.catalog.builtins || []) as Array<Record<string, any>>)
+            .find((item) => item.name === name);
+        if (!row) {
+            doc.innerHTML = this.catalogReady() ? ''
+                : '<span class="muted">正在读取内置任务说明…</span>';
+            return;
+        }
+        doc.innerHTML = `<div class="desk-suite-doc-head">${
+                esc(row.label || row.name)}（${esc(row.name)}）</div>`
+            + `<div class="desk-suite-doc-line">${
+                esc(row.description || '')}</div>`
+            + `<div class="desk-suite-doc-line muted">什么时候用：${
+                esc(row.usage || '—')}</div>`
+            + `<div class="desk-suite-doc-line muted">参数：<code>${
+                esc(row.payload || '{}')}</code>（内置任务不需要参数）</div>`;
+    }
+
+    /** 「帮助 ?」：列出所有 MCP 工具 + 内置任务的解释 / 参数 / 使用场景 ✓ */
+    private openHelp(): void {
+        const old = this.element.querySelector('.desk-suite-help');
+        if (old) {
+            old.remove();
+            return;                      // 再点一次关掉 ✓
+        }
+        if (!this.catalogReady()) this.options.onCommand('ops_catalog', {});
+        const mask = document.createElement('div');
+        mask.className = 'desk-suite-help';
+        const card = document.createElement('div');
+        card.className = 'desk-suite-help-card';
+        card.innerHTML = `<div class="desk-suite-help-head">
+            <b>定时任务：可用工具与内置任务</b>
+            <input class="desk-suite-help-search" placeholder="搜工具名 / 说明…">
+            <button class="desk-tool" data-help-close>关闭</button></div>
+            <div class="desk-suite-help-body"></div>`;
+        mask.appendChild(card);
+        const body = card.querySelector('.desk-suite-help-body') as HTMLElement;
+        const search = card.querySelector<HTMLInputElement>(
+            '.desk-suite-help-search');
+
+        const render = (keyword = '') => {
+            const word = keyword.trim().toLowerCase();
+            const hit = (rows: Array<Record<string, any>>) => rows.filter((row) => {
+                if (!word) return true;
+                return `${row.name} ${row.description || ''} ${row.label || ''}`
+                    .toLowerCase().includes(word);
+            });
+            const tools = hit((this.catalog.tools || []) as Array<
+                Record<string, any>>);
+            const builtins = hit((this.catalog.builtins || []) as Array<
+                Record<string, any>>);
+            body.innerHTML = `<h4>MCP 工具（${tools.length}）</h4>`
+                + (tools.length ? tools.map((row) => {
+                    const params = (row.params || []) as Array<Record<string, any>>;
+                    return `<div class="desk-suite-help-row">
+                        <div class="desk-suite-help-name"><code>${
+                            esc(row.name)}</code></div>
+                        <div class="desk-suite-help-desc">${
+                            esc(row.description || '')}</div>
+                        <div class="muted">参数：${params.length
+                            ? params.map((item) => `${esc(item.name)}${
+                                item.required ? '*' : ''}`).join(' / ')
+                            : '无'}</div>
+                        <div class="desk-suite-help-code">${esc(row.skeleton || '')}</div>
+                    </div>`;
+                }).join('') : '<div class="muted">没有匹配的工具</div>')
+                + `<h4>内置任务（${builtins.length}）</h4>`
+                + builtins.map((row) => `<div class="desk-suite-help-row">
+                        <div class="desk-suite-help-name"><code>${
+                            esc(row.name)}</code>
+                        <b>${esc(row.label || '')}</b></div>
+                        <div class="desk-suite-help-desc">${
+                            esc(row.description || '')}</div>
+                        <div class="muted">什么时候用：${esc(row.usage || '—')}</div>
+                    </div>`).join('');
+        };
+        render('');
+        search?.addEventListener('input', () => render(search?.value || ''));
+        mask.addEventListener('click', (event) => {
+            const node = event.target as HTMLElement;
+            if (node === mask || node.closest('[data-help-close]')) mask.remove();
+        });
+        this.element.appendChild(mask);
+    }
+
+    private taskActionText(row: Record<string, any>): string {
+        const action = row.action || {};
+        if (action.kind === 'tool') return `工具 · ${action.tool || '?'}`;
+        if (action.kind === 'sequence') {
+            const count = (action.steps || []).length;
+            return `多步 · ${count} 步`;
+        }
+        if (action.kind === 'ai') {
+            return `AI · ${action.allow_write ? '可改界面' : '只读'}`;
+        }
+        return `内置 · ${action.name || '?'}`;
+    }
+
+    /** 保护项摘要（悬停看：重试 / 推送 / 回补 ✓） */
+    private taskGuardText(row: Record<string, any>): string {
+        const guard = row.guard || {};
+        const parts: string[] = [];
+        if (guard.retries) parts.push(`失败重试 ${guard.retries} 次`);
+        if (row.notify && row.notify !== 'error') parts.push(`推送：${row.notify}`);
+        if (guard.catch_up) parts.push('停机补跑');
+        if (guard.max_errors) parts.push(`连续失败 ${guard.max_errors} 次自动停用`);
+        return parts.join(' / ') || '默认保护';
+    }
+
+    /** 前置条件（`when`）显示成人话；老数据是字符串也照显示 ✓ */
+    private whenText(row: Record<string, any>): string {
+        const when = row.when;
+        if (!when) return '—';
+        if (typeof when === 'string') return when;
+        if (!when.tool) return '—';
+        const op = when.op === 'count' ? (when.cmp || '>') : (when.op || '>');
+        const target = when.op === 'count'
+            ? `${when.path || ''} 个数` : `${when.path || '值'}`;
+        return `${when.tool} · ${target} ${op} ${when.value ?? ''}`;
+    }
+
+    private taskTriggerText(row: Record<string, any>): string {
+        const trigger = row.trigger || {};
+        if (trigger.kind === 'daily') {
+            return `每天 ${trigger.at || '?'}（${trigger.days || 'everyday'}）`;
+        }
+        if (trigger.kind === 'manual') return '仅手动';
+        if (trigger.kind === 'after') {
+            return `前置成功后：${(trigger.after || []).join('、') || '？'}`;
+        }
+        const deps = (row.guard && row.guard.depends_on) || [];
+        return deps.length
+            ? `每 ${trigger.every || row.interval || 60}s ← ${deps.join('、')}`
+            : `每 ${trigger.every || row.interval || 60}s`;
+    }
+
+    private renderTaskHistory(): void {
+        const box = this.element.querySelector('#op-task-history');
+        if (!box) return;
+        const rows = ((this.data.tasks || {}).history || []) as Array<Record<string, any>>;
+        if (!rows.length) {
+            box.innerHTML = '';
+            return;
+        }
+        box.innerHTML = `<div class="desk-suite-hint">执行历史（最近 ${
+            rows.length} 条）</div><div class="desk-suite-table-wrap">`
+            + table(['时间', '任务', '结果', '耗时', '摘要'], rows.map((row) => [
+                when(row.at), esc(row.name || ''),
+                row.skipped ? `跳过：${esc(row.skipped)}`
+                    : (row.ok ? '<span class="desk-suite-state live">成功</span>'
+                        : '<span class="desk-suite-state warn">失败</span>'),
+                `${row.ms ?? 0}ms`,
+                `<span class="desk-suite-cell" title="${
+                    esc(String(row.error || row.summary || ''))}">${
+                    esc(String(row.error || row.summary || '').slice(0, 60))}</span>`,
+            ]), '') + '</div>';
+    }
+
+    private renderHolidays(): void {
+        const box = this.element.querySelector('#op-holidays');
+        if (!box) return;
+        const days = ((this.data.tasks || {}).holidays
+            || this.data.holidays || []) as string[];
+        box.innerHTML = `<div class="desk-suite-hint">手工休市日（任务勾了「跳过休市日」就跳过）：${
+            days.length ? days.map((day) => esc(day)).join('、') : '（无）'}</div>`;
+    }
+
+    // ---------------------------------------------------------- 表单
+    private editingTask = '';
+
+    private syncTaskForm(): void {
+        const kind = this.value('taskAction');
+        const trigger = this.value('taskTrigger');
+        this.element.querySelectorAll('.task-tool').forEach((node) => {
+            (node as HTMLElement).style.display = kind === 'tool' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-ai').forEach((node) => {
+            (node as HTMLElement).style.display = kind === 'ai' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-seq').forEach((node) => {
+            (node as HTMLElement).style.display = kind === 'sequence' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-after').forEach((node) => {
+            (node as HTMLElement).style.display = trigger === 'after' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-when').forEach((node) => {
+            (node as HTMLElement).style.display = kind === 'manual' ? 'none' : '';
+        });
+        this.element.querySelectorAll('.task-builtin').forEach((node) => {
+            (node as HTMLElement).style.display = kind === 'builtin' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-interval').forEach((node) => {
+            (node as HTMLElement).style.display = trigger === 'interval' ? '' : 'none';
+        });
+        this.element.querySelectorAll('.task-daily').forEach((node) => {
+            (node as HTMLElement).style.display = trigger === 'daily' ? '' : 'none';
+        });
+    }
+
+    private taskPayload(): Record<string, unknown> {
+        const kind = this.value('taskAction');
+        const trigger = this.value('taskTrigger');
+        const payload: Record<string, unknown> = {
+            name: this.value('taskName'),
+            action_kind: kind,
+            trigger_kind: trigger,
+            interval: Number(this.value('taskInterval') || 300),
+            at: this.value('taskAt') || '08:55',
+            days: this.value('taskDays') || 'mon-fri',
+            enabled: this.checked('taskEnabled'),
+            skip_holidays: this.checked('taskSkipHoliday'),
+            only_trading_hours: this.checked('taskSession'),
+            after: this.value('taskAfter'),
+            depends_on: this.value('taskDepends'),
+            retries: Number(this.value('taskRetries') || 0),
+            catch_up: this.checked('taskCatchUp'),
+            notify: this.value('taskNotify') || 'error',
+        };
+        const whenRaw = this.value('taskWhen');
+        if (whenRaw) payload.when = whenRaw;
+        if (kind === 'tool') {
+            payload.tool = this.value('taskTool');
+            payload.args = this.value('taskArgs') || '{}';
+            payload.allow_dangerous = this.checked('taskDanger');
+        } else if (kind === 'sequence') {
+            payload.steps = this.value('taskSteps') || '[]';
+        } else if (kind === 'ai') {
+            payload.prompt = this.value('taskPrompt');
+            payload.allow_write = this.checked('taskWrite');
+        } else {
+            payload.builtin = this.value('taskBuiltin');
+        }
+        return payload;
+    }
+
+    private resetTaskForm(): void {
+        const name = this.input('taskName');
+        if (name) name.value = '';
+        const prompt = this.input('taskPrompt');
+        if (prompt) prompt.value = '';
+        const args = this.input('taskArgs');
+        if (args) args.value = '';
+        const steps = this.input('taskSteps');
+        if (steps) steps.value = '';
+        const when = this.input('taskWhen');
+        if (when) when.value = '';
+        const after = this.input('taskAfter');
+        if (after) after.value = '';
+        const depends = this.input('taskDepends');
+        if (depends) depends.value = '';
+        this.editingTask = '';
+        const button = this.element.querySelector('[data-op-task-add]');
+        if (button) button.textContent = '添加';
+    }
+
+    private editTask(name: string): void {
+        const tasks = ((this.data.tasks || {}).tasks || []) as Array<Record<string, any>>;
+        const row = tasks.find((item) => String(item.name) === name);
+        if (!row) return;
+        const action = row.action || {};
+        const trigger = row.trigger || {};
+        const guard = row.guard || {};
+        const set = (key: string, value: string) => {
+            const node = this.input(key);
+            if (node) node.value = value;
+        };
+        const check = (key: string, value: boolean) => {
+            const node = this.input(key) as HTMLInputElement | null;
+            if (node) node.checked = value;
+        };
+        set('taskName', String(row.name || ''));
+        set('taskAction', String(action.kind || 'builtin'));
+        set('taskTool', String(action.tool || ''));
+        set('taskArgs', JSON.stringify(action.args || {}));
+        set('taskPrompt', String(action.prompt || ''));
+        set('taskSteps', action.steps ? JSON.stringify(action.steps) : '');
+        set('taskWhen', row.when ? JSON.stringify(row.when) : '');
+        set('taskBuiltin', String(action.name || ''));
+        set('taskTrigger', String(trigger.kind || 'interval'));
+        set('taskAfter', (trigger.after || []).join(','));
+        set('taskDepends', (guard.depends_on || []).join(','));
+        set('taskInterval', String(trigger.every || row.interval || 300));
+        set('taskAt', String(trigger.at || '08:55'));
+        set('taskDays', String(trigger.days || 'mon-fri'));
+        check('taskEnabled', !!row.enabled);
+        check('taskSkipHoliday', !!guard.skip_holidays);
+        check('taskSession', !!guard.only_trading_hours);
+        check('taskWrite', !!action.allow_write);
+        check('taskDanger', !!action.allow_dangerous);
+        check('taskCatchUp', !!guard.catch_up);
+        set('taskRetries', String(guard.retries || 0));
+        set('taskNotify', String(row.notify || 'error'));
+        this.editingTask = name;
+        this.syncTaskForm();
+        const button = this.element.querySelector('[data-op-task-add]');
+        if (button) button.textContent = '保存修改';
+        this.options.onToast?.('info', `正在编辑：${name}（改完点「保存修改」）`);
+    }
+
+}
+
 // ================================================================ 运维
 export class OpsPage {
     public readonly element: HTMLDivElement;
@@ -985,7 +1933,10 @@ export class OpsPage {
         this.options = options;
         this.theme = options.theme;
         this.element = shell('ops', this.theme, '平台 / 运维',
-            'API Token、定时任务、企业微信/邮件告警、策略版本回滚。headless 服务用同一套 token。',
+            'API Token、服务状态、策略版本回滚。'
+            + '告警通道在「设置 → 系统设置 → 告警通道」，'
+            + '定时任务在「＋ 新建 ▾ → 定时任务」。'
+            + 'headless 服务用同一套 token。',
             this.skeleton());
         this.element.addEventListener('click', (event) => {
             this.onClick(event);
@@ -1017,45 +1968,8 @@ export class OpsPage {
                 <div id="op-token-out"></div>
                 <div id="op-tokens"></div>
             </section>
-            <section class="desk-suite-card">
-                <h3>定时任务</h3>
-                <div class="desk-suite-form">
-                    <label>名称<input data-op="taskName" placeholder="reconcile"></label>
-                    <label>动作<select data-op="taskAction">
-                        <option value="heartbeat">heartbeat</option>
-                        <option value="snapshot_quotes">snapshot_quotes</option>
-                        <option value="reconcile">reconcile</option>
-                        <option value="prune">prune</option>
-                    </select></label>
-                    <label>间隔（秒）<input data-op="taskInterval" type="number" value="300"></label>
-                </div>
-                <div class="desk-suite-buttons">
-                    <button class="desk-tool primary" data-op-task-add>添加</button>
-                    <button class="desk-tool" data-op-task-run>立即跑到期任务</button>
-                </div>
-                <div id="op-tasks"></div>
-            </section>
         </div>
         <div class="desk-suite-grid">
-            <section class="desk-suite-card">
-                <h3>告警通道</h3>
-                <div class="desk-suite-form">
-                    <label class="inline"><input type="checkbox" data-op="wecomEnabled"> 企业微信</label>
-                    <label class="wide">Webhook<input data-op="wecomWebhook" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="></label>
-                    <label class="inline"><input type="checkbox" data-op="emailEnabled"> 邮件</label>
-                    <label>SMTP<input data-op="emailHost" placeholder="smtp.qq.com"></label>
-                    <label>端口<input data-op="emailPort" type="number" value="465"></label>
-                    <label>账号<input data-op="emailUser"></label>
-                    <label>密码 / 授权码<input data-op="emailPassword" type="password"></label>
-                    <label>收件人<input data-op="emailTo"></label>
-                    <label>发件人<input data-op="emailFrom"></label>
-                </div>
-                <div class="desk-suite-buttons">
-                    <button class="desk-tool primary" data-op-notify-save>保存通道</button>
-                    <button class="desk-tool" data-op-notify-test>发送测试</button>
-                </div>
-                <div id="op-notify"></div>
-            </section>
             <section class="desk-suite-card">
                 <h3>策略版本</h3>
                 <div class="desk-suite-form">
@@ -1109,58 +2023,6 @@ export class OpsPage {
                 { id: revoke.dataset.opTokenRevoke || '' });
             return;
         }
-        if (target.closest('[data-op-task-add]')) {
-            this.options.onCommand('ops_task_add', {
-                name: this.value('taskName') || this.value('taskAction'),
-                action: this.value('taskAction'),
-                interval: Number(this.value('taskInterval') || 300),
-            });
-            return;
-        }
-        if (target.closest('[data-op-task-run]')) {
-            this.options.onCommand('ops_task_run', {});
-            return;
-        }
-        const toggle = target.closest<HTMLElement>('[data-op-task-toggle]');
-        if (toggle) {
-            this.options.onCommand('ops_task_toggle', {
-                name: toggle.dataset.opTaskToggle || '',
-                enabled: toggle.dataset.enabled !== '1',
-            });
-            return;
-        }
-        const drop = target.closest<HTMLElement>('[data-op-task-remove]');
-        if (drop) {
-            this.options.onCommand('ops_task_remove',
-                { name: drop.dataset.opTaskRemove || '' });
-            return;
-        }
-        if (target.closest('[data-op-notify-save]')) {
-            this.options.onCommand('ops_notify_config', {
-                kind: this.checked('emailEnabled') ? 'email' : 'wecom',
-                values: {
-                    enabled: this.checked('emailEnabled') ? true : this.checked('wecomEnabled'),
-                    webhook: this.value('wecomWebhook'),
-                    host: this.value('emailHost'),
-                    port: Number(this.value('emailPort') || 465), ssl: true,
-                    user: this.value('emailUser'),
-                    password: this.value('emailPassword'),
-                    to: this.value('emailTo'), from: this.value('emailFrom'),
-                },
-            });
-            // 两个通道都保存一次（简单可靠）
-            this.options.onCommand('ops_notify_config', {
-                kind: 'wecom', values: {
-                    enabled: this.checked('wecomEnabled'),
-                    webhook: this.value('wecomWebhook'),
-                },
-            });
-            return;
-        }
-        if (target.closest('[data-op-notify-test]')) {
-            this.options.onCommand('ops_notify_test', {});
-            return;
-        }
         if (target.closest('[data-op-version-snapshot]')) {
             this.options.onCommand('ops_version_snapshot',
                 { path: this.value('versionPath') });
@@ -1197,24 +2059,9 @@ export class OpsPage {
             this.render(patch);
             return;
         }
-        if (type === 'ops_tasks') {
-            this.data.tasks = patch.tasks;
-            this.renderTasks();
-            const results = (patch.results || []) as Array<Record<string, any>>;
-            const box = this.element.querySelector('#op-tasks');
-            if (box && results.length) {
-                box.insertAdjacentHTML('afterbegin', `<div class="desk-suite-hint">${
-                    results.map((row) => `${esc(row.name)}: ${
-                        row.ok ? 'OK' : '失败 ' + esc(row.error)}`).join('；')
-                }</div>`);
-            }
-            return;
-        }
         if (type === 'ops_notify') {
-            if (patch.notify) {
-                this.data.notify = patch.notify;
-                this.renderNotify();
-            }
+            // 告警通道已搬到设置页（v1.3.7-91）→ 运维页只留数据，不再画 ✓
+            if (patch.notify) this.data.notify = patch.notify;
             return;
         }
         if (type === 'ops_versions') {
@@ -1244,55 +2091,7 @@ export class OpsPage {
                         : `<button class="desk-suite-link" data-op-token-revoke="${esc(row.id || '')}">撤销</button>`,
                 ]), '还没有 token');
         }
-        this.renderTasks();
-        this.renderNotify();
         this.renderVersions();
-    }
-
-    private renderTasks(): void {
-        const tasks = ((this.data.tasks || {}).tasks || []) as Array<Record<string, any>>;
-        const box = this.element.querySelector('#op-tasks');
-        if (!box) return;
-        box.innerHTML = table(['名称', '动作', '间隔', '下次', '上次', '状态', '操作'],
-            tasks.map((row) => [
-                esc(row.name || ''), esc(row.action || ''),
-                `${esc(row.interval)}s`, when(row.next_run), when(row.last_run),
-                row.enabled ? `<span class="desk-suite-state live">${
-                    esc(row.last_status || '待运行')}</span>`
-                    : '<span class="muted">已停用</span>',
-                `<button class="desk-suite-link" data-op-task-toggle="${esc(row.name)}" data-enabled="${row.enabled ? '1' : '0'}">${row.enabled ? '停用' : '启用'}</button>
-                 <button class="desk-suite-link" data-op-task-remove="${esc(row.name)}">删除</button>`,
-            ]), '还没有任务');
-    }
-
-    private renderNotify(): void {
-        const notify = this.data.notify || {};
-        const config = notify.config || {};
-        const wecom = config.wecom || {};
-        const email = config.email || {};
-        const setInput = (name: string, value: unknown) => {
-            const input = this.input(name);
-            if (input && input.type !== 'checkbox') input.value = value === null
-                || value === undefined ? '' : String(value);
-        };
-        const wecomOn = this.input('wecomEnabled') as HTMLInputElement | null;
-        if (wecomOn) wecomOn.checked = !!wecom.enabled;
-        const emailOn = this.input('emailEnabled') as HTMLInputElement | null;
-        if (emailOn) emailOn.checked = !!email.enabled;
-        setInput('wecomWebhook', wecom.webhook);
-        setInput('emailHost', email.host);
-        setInput('emailPort', email.port);
-        setInput('emailUser', email.user);
-        setInput('emailTo', email.to);
-        setInput('emailFrom', email.from);
-        const box = this.element.querySelector('#op-notify');
-        if (!box) return;
-        const history = (notify.history || []) as Array<Record<string, any>>;
-        box.innerHTML = table(['时间', '标题', '结果'], history.map((row) => [
-            when(row.at), esc(row.title || ''),
-            esc((row.results || []).map((item: any) =>
-                `${item.channel}:${item.ok ? 'ok' : 'fail'}`).join('；')),
-        ]), '还没有发送记录');
     }
 
     private renderVersions(): void {

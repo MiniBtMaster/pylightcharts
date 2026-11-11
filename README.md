@@ -20,7 +20,7 @@ aiming at **near-full API coverage** with a pythonic interface.
 > news, calendar, symbol details, …) rendered on the same host page and driven from Python.
 > See [Financial panels](#financial-panels-tradingview-style-widgets).
 >
-> Release notes: [`docs/changelog.md`](docs/changelog.md) — latest **0.1.9**.
+> Release notes: [`docs/changelog.md`](docs/changelog.md) — latest **0.2.0**.
 
 ## How it works
 

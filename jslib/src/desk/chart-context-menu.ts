@@ -34,6 +34,16 @@ export interface ChartContextSpec {
     /** 当前页有 ≥2 个图表 → 「关闭图表」可用（用户要求 ✓） */
     canCloseChart?: boolean;
     onIndicatorPicker: () => void;
+    /** 工具栏「更多指标」= 指标和策略选择器（用户 2026-11-08 要求进右键 ✓） */
+    onMoreIndicators?: () => void;
+    /** 工具栏「模板」= 指标模板对话框 ✓ */
+    onTemplates?: () => void;
+    /** 编辑器「策略管理」= 所有图表已加载策略（含运行开关）✓ */
+    onStrategyManage?: () => void;
+    /** 布局「已保存的布局」下面：保存当前布局 ✓ */
+    onSaveLayout?: () => void;
+    /** 「资讯 / 财务…」= 打开标的资讯页（多布局带多标的导航 ✓） */
+    onSymbolInfo?: () => void;
     onAddFavorite: (key: string) => void;
     /** 收藏策略 → 按文件路径加到图表（和编辑器「加到图表」同一条命令 ✓） */
     onAddStrategy?: (path: string, key?: string) => void;
@@ -126,6 +136,17 @@ export function showChartContextMenu(spec: ChartContextSpec,
 
     const items: MenuItem[] = [
         { label: '指标', run: spec.onIndicatorPicker },
+        // ★ 用户 2026-11-08：工具栏这两个入口也要能用右键进 ✓
+        {
+            label: '更多指标…',
+            disabled: !spec.onMoreIndicators,
+            run: spec.onMoreIndicators,
+        },
+        {
+            label: '模板',
+            disabled: !spec.onTemplates,
+            run: spec.onTemplates,
+        },
         { label: '收藏指标', submenu: favoriteItems },
         { label: '收藏策略', submenu: strategyItems },
         { label: '我的模板', submenu: templateItems },
@@ -135,6 +156,16 @@ export function showChartContextMenu(spec: ChartContextSpec,
             run: spec.onSaveTemplate,
         },
         { label: '删除指标策略', run: spec.onRemove },
+        {
+            label: '策略管理…',
+            disabled: !spec.onStrategyManage,
+            run: spec.onStrategyManage,
+        },
+        {
+            label: '资讯 / 财务…（F10）',
+            disabled: !spec.onSymbolInfo,
+            run: spec.onSymbolInfo,
+        },
 
         { label: '周期', separator: true, submenu: cycleItems },
 
@@ -148,6 +179,12 @@ export function showChartContextMenu(spec: ChartContextSpec,
             label: '收藏布局',
             submenu: favoriteLayouts.length ? favoriteLayouts
                 : [{ label: '（暂无收藏布局）', disabled: true }],
+        },
+        // ★ 「已保存的布局」下面紧跟「保存当前布局」（用户 2026-11-08 ✓）
+        {
+            label: '保存当前布局…',
+            disabled: !spec.onSaveLayout,
+            run: spec.onSaveLayout,
         },
 
         { label: '画线', separator: true, run: spec.onToggleToolBox },

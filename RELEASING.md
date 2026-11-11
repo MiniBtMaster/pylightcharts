@@ -25,7 +25,7 @@ python -m pytest tests/test_packaging.py -q
 `Changed` / `Fixed` / `Notes`，再补发布当天的日期）：
 
 ```markdown
-## [0.1.9] - 2026-11-06
+## [0.2.0] - 2026-11-11
 ```
 
 ## 3. 重新构建 JS bundle（改了 `jslib/` 才需要）
@@ -90,8 +90,8 @@ python -m venv /tmp/verify && /tmp/verify/bin/pip install dist/*.whl
 
 ```bash
 git add -A
-git commit -m "Release 0.1.9"
-git tag -a v0.1.9 -m "pylightcharts 0.1.9"
+git commit -m "Release 0.2.0"
+git tag -a v0.2.0 -m "pylightcharts 0.2.0"
 git push origin master --tags
 ```
 

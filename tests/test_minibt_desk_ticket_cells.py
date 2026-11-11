@@ -2074,7 +2074,8 @@ def test_dock_active_follows_payload_key():
         'this.accountCatalog?.active')
     # 图表页创建时要问后端要**这一页**的账户目录 ✓
     app = _read('jslib/src/desk/app.ts')
-    assert "this.send('account_kind', { page: `chart:${symbol}` });" in app
+    # v1.3.7-67：开图时 account_kind 延后发（先出 K 线 ✓）
+    assert "['account_kind', { page: `chart:${symbol}` }, 0]," in app
     # 后端打开图表时也主动推这一页的目录 + 数据 ✓
     desk_py = _read('minibt/desk/app.py')
     assert "kind['page'] = page" in desk_py

@@ -45,6 +45,31 @@ export interface SettingsValues {
     editor_minibt_path?: string;
     /** 运行日志：程序内输出（日志页 / 底部面板） */
     log_ui?: boolean;
+    /** 编辑器字号基准（px；跟界面缩放相乘 ✓ v1.3.7） */
+    editor_font_size?: number;
+    /** 终端（v1.3.7-2：AI 对话改在终端里启动 ✓） */
+    terminal_shell?: string;
+    terminal_ai_command?: string;
+    /** AI 助手（v1.3.7-4：内置会话 + 对话，任意 OpenAI 兼容接口 ✓） */
+    ai_base_url?: string;
+    ai_model?: string;
+    ai_api_key?: string;
+    ai_tools?: boolean;
+    ai_max_turns?: number;
+    /** PI 操控 desk：允许（默认开）/ 允许下单（默认关）✓ */
+    ai_desk_allow?: boolean;
+    ai_desk_order?: boolean;
+    scheduler_enabled?: boolean;
+    /** PI 悬浮球背景色（`''` = 默认配色） */
+    pi_float_color?: string;
+    /** 本机桥 / 外部 MCP 工具（默认都开 ✓） */
+    ai_mcp_bridge?: boolean;
+    ai_mcp_tools?: boolean;
+    ai_price_in?: string;
+    ai_price_out?: string;
+    ai_context_window?: string;
+    /** 图上事件圆点：true = 全部事件（默认只画中 / 高重要性） */
+    chart_events_all?: boolean;
     /** 指标选择器默认分组：all / overlay / sub */
     indicator_overlay_filter?: string;
     /** 播放条只显示有报价的合约 */
@@ -101,6 +126,8 @@ export interface SettingsPageOptions {
     onSetting: (key: string, value: unknown) => void;
     /** 后端动作：`open_url` / `open_data_dir` ✓ */
     onCommand: (cmd: string, payload?: unknown) => void;
+    /** 轻提示（告警通道保存 / 测试用 ✓） */
+    onToast?: (level: string, text: string) => void;
 }
 
 /** 主题色候选（miniqt「主题色」下拉 ✓） */
@@ -221,6 +248,10 @@ const CSS = `
     color: var(--desk-text); font-size: 12px; cursor: pointer; }
 .desk-settings-btn.primary { background: var(--desk-accent); color: #fff;
     border-color: var(--desk-accent); }
+.desk-settings-para { font-size: 11.5px; line-height: 1.6; color: var(--desk-muted);
+    margin: 2px 0 10px; white-space: pre-wrap; }
+.desk-settings-para.ok { color: #26a69a; }
+.desk-settings-para.err { color: #ef5350; }
 .desk-settings-btn:hover { filter: brightness(1.08); }
 .desk-settings-switch { position: relative; width: 38px; height: 20px;
     border-radius: 10px; background: var(--desk-border); cursor: pointer;
@@ -241,6 +272,9 @@ const CSS = `
 `;
 
 const ICONS: Record<string, string> = {
+    bell: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
+        + 'stroke="currentColor" stroke-width="1.7"><path d="M6 16V11a6 6 0 '
+        + '0 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg>',
     folder: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" '
         + 'stroke="currentColor" stroke-width="1.7"><path d="M3 7h6l2 2h10v10H3z"/>'
         + '</svg>',
@@ -286,10 +320,32 @@ const ICONS: Record<string, string> = {
 };
 
 /** 左侧导航：分组 → 页面 ✓ */
+/** AI 设置在本机的兜底缓存（后端没存成功也不丢 ✓） */
+const AI_STORE = 'desk.ai.';
+
+function localAi(key: string): string {
+    try {
+        return window.localStorage.getItem(AI_STORE + key) || '';
+    } catch {
+        return '';
+    }
+}
+
+function saveLocalAi(key: string, value: string): void {
+    try {
+        if (value === '') window.localStorage.removeItem(AI_STORE + key);
+        else window.localStorage.setItem(AI_STORE + key, value);
+    } catch {
+        /* 隐私模式忽略 */
+    }
+}
+
 const NAV: Array<{ group: string; items: Array<{ key: string; label: string }> }> = [
     { group: '系统设置', items: [
         { key: 'files', label: '本地文件' },
         { key: 'personal', label: '个性化' },
+        { key: 'info-sources', label: '资讯数据源' },
+        { key: 'alerts', label: '告警通道' },
         { key: 'about', label: '关于' },
     ] },
     { group: '模拟账户', items: [
@@ -311,6 +367,18 @@ export class SettingsPage {
     private sim: SimPayload = {};
     /** 后端刚推数据回来时的重画：不要再请求一次（否则死循环 ✗） */
     private quiet = false;
+    /** 有"待重画"（用户正在输入时跳过的重画 ✓） */
+    private pendingRepaint = false;
+    /** 最近一次提交的键（用来确认后端到底存了没有 ✓） */
+    private lastKey = '';
+    /** PI 操控 desk 的审计日志显示区（设置页 ✓） */
+    private auditBox: HTMLPreElement | null = null;
+    /** 资讯数据源状态（`info_status` 补丁 ✓） */
+    private infoStatus: Record<string, unknown> = {};
+    /** 告警通道配置 + 历史（`ops` / `ops_notify` 补丁 ✓ v1.3.7-91） */
+    private notify: Record<string, any> = {};
+    /** 账户净值序列（`ops_equity` 补丁 ✓ v1.3.7-95） */
+    private equity: Record<string, any> = {};
 
     constructor(options: SettingsPageOptions) {
         this.options = options;
@@ -331,6 +399,7 @@ export class SettingsPage {
                     ICONS[item.key === 'files' ? 'folder'
                         : item.key === 'personal' ? 'theme'
                         : item.key === 'sim' ? 'money'
+                        : item.key === 'alerts' ? 'bell'
                         : item.key === 'about' ? 'info' : 'chart']}</span>`;
                 const text = document.createElement('span');
                 text.textContent = item.label;
@@ -346,9 +415,101 @@ export class SettingsPage {
         this.show(this.active);
     }
 
+    /** 后端推来的资讯数据源状态（AkShare 版本 / 缓存条数 ✓） */
+    setInfoStatus(payload: Record<string, unknown>): void {
+        this.infoStatus = payload || {};
+        if (this.active !== 'info-sources') return;
+        this.quiet = true;
+        try {
+            this.show('info-sources');
+        } finally {
+            this.quiet = false;
+        }
+    }
+
+    /** 告警通道（`ops` 快照里的 notify / `ops_notify` 补丁）✓ */
+    setNotify(payload: Record<string, any>): void {
+        const notify = (payload && (payload.notify || payload)) || {};
+        this.notify = { ...this.notify, ...notify };
+        if (payload && Array.isArray(payload.alert_rules)
+                && payload.alert_rules.length) {
+            this.notify.alert_rules = payload.alert_rules;
+        }
+        if (payload && payload.alert_settings
+                && typeof payload.alert_settings === 'object') {
+            this.notify.alert_settings = payload.alert_settings;
+        }
+        if (this.active !== 'alerts') return;
+        this.quiet = true;
+        try {
+            this.show('alerts');
+        } finally {
+            this.quiet = false;
+        }
+    }
+
+    /** 净值曲线数据（`ops_equity` 补丁）✓ */
+    setEquity(payload: Record<string, any>): void {
+        this.equity = payload || {};
+        if (this.active !== 'alerts') return;
+        this.quiet = true;
+        try {
+            this.show('alerts');
+        } finally {
+            this.quiet = false;
+        }
+    }
+
+    /** 后端推来的审计日志 → 填进设置页 ✓ */
+    setAudit(rows: Array<Record<string, unknown>>): void {
+        if (!this.auditBox) return;
+        if (!rows.length) {
+            this.auditBox.textContent = '（还没有调用记录）';
+            return;
+        }
+        this.auditBox.textContent = rows.map((row) => {
+            const args = row.args ? JSON.stringify(row.args) : '';
+            const result = String(row.result || '')
+                .replace(/\s+/g, ' ').slice(0, 80);
+            return `${String(row.at || '')}  ${String(row.tool || '')}`
+                + `  ${args.slice(0, 60)}` + '\n' + `    → ${result}`;
+        }).join('\n');
+    }
+
     /** 后端推来的设置（主题 / 缩放等）→ 重画 ✓ */
     setValues(values: SettingsValues): void {
         this.options = { ...this.options, values };
+        // ★ 用户正在输入 → **不要重画**（以前整页重建会把刚敲的字冲掉，
+        //   若后端没存成功就表现为"写完不显示" ✗ 用户 2026-11-08 实测）
+        const active = document.activeElement as HTMLElement | null;
+        if (active && this.element.contains(active)
+            && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) {
+            this.pendingRepaint = true;
+            return;
+        }
+        this.pendingRepaint = false;
+        this.show(this.active);
+    }
+
+    /** 记下最近提交的设置键（后端回推时对比，确认真的存了 ✓） */
+    rememberSetting(key: string): void {
+        this.lastKey = key;
+    }
+
+    /** 最近提交的键（测试 / 调试用 ✓） */
+    get lastSettingKey(): string {
+        return this.lastKey;
+    }
+
+    /** 重新画当前分区（设置页切回来 / 定时器用 ✓） */
+    repaint(): void {
+        if (!this.pendingRepaint) return;
+        const active = document.activeElement as HTMLElement | null;
+        if (active && this.element.contains(active)
+            && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)) {
+            return;
+        }
+        this.pendingRepaint = false;
         this.show(this.active);
     }
 
@@ -386,6 +547,8 @@ export class SettingsPage {
             case 'chart-config': this._renderChartConfig(); break;
             case 'chart-colors': this._renderChartColors(); break;
             case 'sim': this._renderSim(); break;
+            case 'info-sources': this._renderInfoSources(); break;
+            case 'alerts': this._renderAlerts(); break;
             default: this._renderPersonal(); break;
         }
     }
@@ -471,6 +634,105 @@ export class SettingsPage {
             'Ctrl+S 保存前先用 ruff / black 格式化（可 Ctrl+Z 撤销 ✓）',
             this._switch(!!v.editor_format_on_save, (checked) =>
                 this.options.onSetting('editor_format_on_save', checked)));
+        this._row('editor_font_size', '编辑器字号',
+            '编辑器代码字号基准（px），会按「界面缩放」等比放大 ✓',
+            this._select(
+                [{ value: '11', label: '11' }, { value: '12', label: '12' },
+                 { value: '12.5', label: '12.5（默认）' },
+                 { value: '13', label: '13' }, { value: '14', label: '14' },
+                 { value: '16', label: '16' }, { value: '18', label: '18' }],
+                String(v.editor_font_size || '12.5'),
+                (value) => this.options.onSetting('editor_font_size',
+                                                  Number(value) || 12.5)));
+        // ★ 终端（v1.3.7-2）：编辑器底部的 shell；AI 对话也在终端里启动 ✓
+        this._section('终端（编辑器）');
+        this._row('terminal_shell', 'Shell 命令',
+            '留空 = 系统默认（Windows 用 cmd.exe；Linux/macOS 用 $SHELL）',
+            this._textInput(String(v.terminal_shell || ''),
+                (value) => this.options.onSetting('terminal_shell', value),
+                'cmd.exe /Q /K'));
+        this._row('terminal_ai_command', 'AI CLI 命令',
+            '在终端里手动输入的命令（例如 pi / claude / codex / '
+            + 'ollama run qwen2.5-coder）；留空 = pi',
+            this._textInput(String(v.terminal_ai_command || ''),
+                (value) => this.options.onSetting('terminal_ai_command', value),
+                'pi'));
+        // ★ PI 操控 desk（v1.3.7-26）：总开关 + 下单开关 + 审计日志 ✓
+        this._section('PI 操控 desk');
+        this._row('ai_desk_allow', '允许 PI 操控 desk',
+            '打开后，对话里可以让 PI 切合约 / 加指标 / 布局 / 跑回测；'
+            + '关掉则只能看（只读工具仍然可用）',
+            this._switch(v.ai_desk_allow !== false, (checked) =>
+                this.options.onCommand('ai_desk_save', { allow: checked })));
+        this._row('ai_desk_order', '允许下单 / 策略实盘',
+            '**默认关闭**：打开后 PI 才能在用户二次确认后真实下单、'
+            + '启动策略实盘（只允许限价单）',
+            this._switch(v.ai_desk_order === true, (checked) =>
+                this.options.onCommand('ai_desk_save', { order: checked })));
+        // ★ v1.3.7-79：定时任务总开关（急停用；关掉后一个都不跑 ✓）
+        this._section('定时任务');
+        this._row('scheduler_enabled', '启用定时任务',
+            '总开关：关掉后运维页里所有定时任务都不会跑（单个任务也能在'
+            + '运维页停用）。任务可以调 MCP 工具、也可以定时发给 AI',
+            this._switch(v.scheduler_enabled !== false, (checked) =>
+                this.options.onSetting('scheduler_enabled', checked)));
+        // ★ 悬浮球背景色（用户 2026-11-08：可自选 + 持久化 + 恢复默认 ✓）
+        const colorBox = document.createElement('div');
+        colorBox.className = 'desk-settings-buttons';
+        const picker = document.createElement('input');
+        picker.type = 'color';
+        picker.className = 'desk-settings-color';
+        picker.value = /^#[0-9a-fA-F]{6}$/.test(String(v.pi_float_color || ''))
+            ? String(v.pi_float_color) : '#1f8f8f';
+        picker.title = 'PI 悬浮球背景色';
+        picker.addEventListener('input', () => {
+            this.options.onSetting('pi_float_color', picker.value);
+        });
+        colorBox.append(picker, this._button('默认颜色', () => {
+            this.options.onSetting('pi_float_color', '');
+            this.show(this.active);
+        }));
+        this._row('pi_float_color', '悬浮球背景色',
+            '设置后 PI 悬浮小球（右下角 π）用这个颜色；'
+            + '点「默认颜色」恢复主题配色',
+            colorBox);
+        this._row('pi_cleanup', '清理重复会话',
+            '同一句话反复发送会各建一个会话（老版本的副作用）→ '
+            + '这里删掉「空会话」和「内容完全重复」的（每组保留最新一条）',
+            this._button('清理…', () => {
+                if (!window.confirm('清理空会话 / 重复会话？'
+                    + '（每组保留最新一条）')) return;
+                this.options.onCommand('pi_cleanup', {});
+            }));
+        this._row('ai_mcp_bridge', 'MCP 本机桥',
+            '在 127.0.0.1 开一个只读本机的端口（带 token）：外部程序 / MCP '
+            + '客户端可以操控**这个** desk 窗口（默认开）',
+            this._switch(v.ai_mcp_bridge !== false, (checked) =>
+                this.options.onSetting('ai_mcp_bridge', checked)));
+        this._row('ai_mcp_tools', '接入外部 MCP 工具',
+            '把「mcp.json」里其它 server 的工具挂进 PI 对话（名字形如 '
+            + 'mcp__server__tool；改完 1 分钟内生效）',
+            this._switch(v.ai_mcp_tools !== false, (checked) =>
+                this.options.onSetting('ai_mcp_tools', checked)));
+        const auditButtons = document.createElement('div');
+        auditButtons.className = 'desk-settings-buttons';
+        auditButtons.append(
+            this._button('查看最近 200 条', () => {
+                this.options.onCommand('ai_audit', { limit: 200 });
+            }),
+            this._button('清空', () => {
+                if (!window.confirm('清空审计日志？')) return;
+                this.options.onCommand('ai_audit_clear', {});
+            }));
+        this._row('ai_audit', '审计日志',
+            '每次 PI 调用 desk 工具都会记一条（密码 / key 已脱敏）',
+            auditButtons);
+        this.auditBox = document.createElement('pre');
+        this.auditBox.className = 'desk-settings-audit';
+        this.auditBox.textContent = '（点上面的「查看最近 200 条」）';
+        this._row('ai_audit_list', '最近调用',
+            '新的在前；只删日志文件里的记录，不影响其它数据',
+            this.auditBox);
         // ★ 手动指定 minibt 路径（默认**不启用**）：编辑器（jedi）找不到
         //   minibt 时，用它来给悬停 / 补全找注释 ✓
         this._row('editor_minibt_path_enabled', '手动指定 minibt 路径',
@@ -487,6 +749,424 @@ export class SettingsPage {
     }
 
     // ------------------------------------------------------------ 关于
+    // ------------------------------------------------------------ 资讯数据源
+    private _renderInfoSources(): void {
+        const data = this.infoStatus;
+        const installed = data.installed !== false;
+        const cache = (data.cache || {}) as Record<string, unknown>;
+        const last = Number(cache.last_fetch || 0);
+        this._title('资讯数据源');
+        this._section('AkShare（免费、无需 token）');
+        this._row('info', 'AkShare',
+            installed
+                ? `已安装 ${String(data.version || '')}`
+                + '　·　快讯 / 要闻 / 财经日历 / 个股新闻都从这里取'
+                : '未安装 —— 在终端执行：pip install "minibt[news]"',
+            this._button('重新检测', () => {
+                this.options.onCommand('info_status', {});
+            }));
+        this._row('folder', '本地缓存',
+            `资讯 ${String(cache.news || 0)} 条 · 日历 `
+            + `${String(cache.calendar || 0)} 条`
+            + (last ? `　·　上次抓取 ${new Date(last * 1000)
+                .toLocaleString('zh-CN', { hour12: false })}` : ''),
+            this._button('清空缓存', () => {
+                this.options.onCommand('info_clear', {});
+            }));
+        if (String(data.last_error || '')) {
+            this._section('上次抓取错误');
+            const box = document.createElement('pre');
+            box.className = 'desk-settings-audit';
+            box.textContent = String(data.last_error);
+            this.body.appendChild(box);
+        }
+        this._section('说明');
+        const note = document.createElement('div');
+        note.className = 'desk-settings-note';
+        note.innerHTML = '资讯数据全部来自 <b>AkShare</b> 封装的数据源'
+            + '（新浪 / 东方财富 / 财新 / 百度股市通 / 上期能源）；'
+            + '本机只缓存「标题 + 时间 + 来源 + 链接 + 短摘要」，不存正文。';
+        this.body.appendChild(note);
+    }
+
+    // ------------------------------------------------------------ 告警通道
+    private _renderAlerts(): void {
+        const data = this.notify || {};
+        const config = (data.config || {}) as Record<string, any>;
+        const wecom = config.wecom || {};
+        const xtuis = config.xtuis || {};
+        const email = config.email || {};
+        const hook = config.webhook || {};
+        // 打开这一页时向后端要一次（后端刚推回来的那次不要再要 ✗）
+        if (!this.quiet) {
+            this.options.onCommand('ops', {});
+            this.options.onCommand('ops_equity', {});
+        }
+        this._title('告警通道');
+        this._section('微信公众号（推荐：关注公众号就能收到）');
+        let xtuisEnabled = !!xtuis.enabled;
+        const xtuisOn = this._switch(xtuisEnabled, (checked) => {
+            xtuisEnabled = checked;
+            this.options.onCommand('ops_notify_config', {
+                kind: 'xtuis', values: { enabled: checked } });
+        });
+        const token = this._input(String(xtuis.token || ''),
+            '关注公众号 xtuis → 回复 token 获取');
+        const custom = this._input(String(xtuis.url || ''),
+            '留空 = https://wx.xtuis.cn/{token}.send');
+        const saveX = this._button('保存', () => {
+            this.options.onCommand('ops_notify_config', {
+                kind: 'xtuis',
+                // 填了 token 就顺手启用（少一步 ✓）
+                values: { enabled: xtuisEnabled || !!token.value.trim(),
+                          token: token.value.trim(),
+                          url: custom.value.trim() },
+            });
+            this.options.onToast?.('success', '公众号推送已保存');
+        }, true);
+        const wrap = (items: HTMLElement[]) => {
+            const box = document.createElement('div');
+            box.className = 'desk-settings-inline';
+            for (const item of items) box.appendChild(item);
+            return box;
+        };
+        this._row('bell', '启用公众号推送', '定时任务 / 预警 / 交易通知都会发到这里',
+            xtuisOn);
+        this._row('info', 'Token', '关注公众号后按提示回复 token', token);
+        this._row('info', '推送地址', '换同类服务时改这里（{token} 是占位符）',
+            wrap([custom, saveX]));
+
+        this._section('企业微信 / 邮件 / 自定义 Webhook');
+        const wecomInput = this._input(String(wecom.webhook || ''),
+            'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=');
+        this._row('bell', '企业微信群机器人', '填 Webhook 地址即可',
+            wrap([wecomInput, this._button('保存', () => {
+                this.options.onCommand('ops_notify_config', {
+                    kind: 'wecom',
+                    values: { enabled: true,
+                              webhook: wecomInput.value.trim() },
+                });
+                this.options.onToast?.('success', '企业微信已保存');
+            })]));
+        const host = this._input(String(email.host || ''), 'smtp.qq.com');
+        const port = this._input(String(email.port || 465), '465');
+        const user = this._input(String(email.user || ''), '账号');
+        const pass = this._input(String(email.password || ''), '授权码',
+                                 'password');
+        const to = this._input(String(email.to || ''), '收件人');
+        this._row('info', 'SMTP 服务器', '发信服务器 + 端口',
+            wrap([host, port]));
+        this._row('info', '账号 / 授权码', '邮箱账号与 SMTP 授权码',
+            wrap([user, pass]));
+        this._row('info', '收件人', '测试与告警都发到这里',
+            wrap([to, this._button('保存邮件', () => {
+                this.options.onCommand('ops_notify_config', {
+                    kind: 'email',
+                    values: { enabled: true, host: host.value.trim(),
+                              port: Number(port.value || 465),
+                              user: user.value.trim(),
+                              password: pass.value,
+                              to: to.value.trim(),
+                              from: user.value.trim() },
+                });
+                this.options.onToast?.('success', '邮件通道已保存');
+            })]));
+        const hookUrl = this._input(String(hook.url || ''),
+            'https://…（Server酱 / PushPlus / 钉钉 / 自建）');
+        const hookBody = this._input(String(hook.template || ''),
+            '{"title":"{title}","text":"{text}"}');
+        this._row('info', '自定义 Webhook', 'POST JSON；模板支持 {title}{text}{level}',
+            wrap([hookUrl, hookBody, this._button('保存', () => {
+                this.options.onCommand('ops_notify_config', {
+                    kind: 'webhook',
+                    values: { enabled: true, url: hookUrl.value.trim(),
+                              method: String(hook.method || 'POST'),
+                              template: hookBody.value.trim() },
+                });
+                this.options.onToast?.('success', 'Webhook 已保存');
+            })]));
+
+        this._section('测试与记录');
+        this._row('bell', '发送测试',
+            '每个通道各发一条，下面能看到每个通道的返回',
+            this._button('发送测试', () => {
+                this.options.onCommand('ops_notify_test', {});
+            }, true));
+        if (String(data.last_error || '')) {
+            const box = document.createElement('pre');
+            box.className = 'desk-settings-audit';
+            box.textContent = String(data.last_error);
+            this.body.appendChild(box);
+        }
+        const history = (data.history || []) as Array<Record<string, any>>;
+        if (history.length) {
+            const box = document.createElement('pre');
+            box.className = 'desk-settings-audit';
+            box.textContent = history.slice(0, 8).map((row) => {
+                const at = new Date(Number(row.at || 0) * 1000)
+                    .toLocaleString('zh-CN', { hour12: false });
+                const parts = ((row.results || []) as Array<Record<string, any>>)
+                    .map((item) => `${item.channel}:${
+                        item.ok ? 'ok' : 'fail'}`);
+                return `${at}  ${String(row.title || '')}  ${parts.join(' ')}`;
+            }).join('\n');
+            this.body.appendChild(box);
+        }
+        this._renderAlertRules();
+    }
+
+    /** 告警规则：哪些事件推手机 / 等级 / 去重窗口（v1.3.7-92 ✓） */
+    private _renderAlertRules(): void {
+        const rules = (this.notify.alert_rules || []) as Array<Record<string, any>>;
+        this._section('告警规则（哪些事要推手机）');
+        if (!rules.length) {
+            const hint = document.createElement('div');
+            hint.className = 'desk-settings-note';
+            hint.textContent = '正在读取规则…（保存一次通道或点「发送测试」也会刷新）';
+            this.body.appendChild(hint);
+            return;
+        }
+        const draft = new Map<string, Record<string, any>>();
+        // ★ v1.3.7-96：按来源分组（交易 / 预警 / 持仓 / 行情 / 定时任务 /
+        //   策略 / 资讯 / 系统），顺序跟目录一致，不另造分组名 ✓
+        const order: string[] = [];
+        for (const row of rules) {
+            const group = String(row.source || '其它');
+            if (!order.includes(group)) order.push(group);
+        }
+        for (const group of order) {
+            const items = rules.filter((row) =>
+                String(row.source || '其它') === group);
+            const head = document.createElement('div');
+            head.className = 'desk-settings-section';
+            head.textContent = `${group}（${items.length}）`;
+            this.body.appendChild(head);
+        for (const row of items) {
+            const id = String(row.id || '');
+            draft.set(id, { id, enabled: !!row.enabled,
+                            level: String(row.level || 'info'),
+                            min_interval: Number(row.min_interval || 0),
+                            threshold: Number(row.threshold || 0) });
+            const box = document.createElement('div');
+            box.className = 'desk-settings-row';
+            const icon = document.createElement('span');
+            icon.className = 'desk-settings-icon';
+            icon.innerHTML = ICONS.bell;
+            const text = document.createElement('div');
+            text.className = 'desk-settings-text';
+            text.innerHTML = `<div class="desk-settings-name">${
+                String(row.label || id)}</div>`
+                + `<div class="desk-settings-desc">${String(row.desc || '')}`
+                + `　·　${String(row.source || '')}</div>`;
+            const control = document.createElement('div');
+            control.className = 'desk-settings-inline';
+            const level = this._select(
+                [{ value: 'info', label: '一般' },
+                 { value: 'warning', label: '重要' },
+                 { value: 'error', label: '严重' }],
+                String(row.level || 'info'),
+                (value) => {
+                    const item = draft.get(id);
+                    if (item) item.level = String(value);
+                });
+            const wait = this._input(String(row.min_interval || 0),
+                                     '去重（秒）');
+            wait.style.width = '86px';
+            wait.addEventListener('input', () => {
+                const item = draft.get(id);
+                if (item) item.min_interval = Number(wait.value || 0);
+            });
+            const toggle = this._switch(!!row.enabled, (checked) => {
+                const item = draft.get(id);
+                if (item) item.enabled = checked;
+            });
+            control.append(toggle, level);
+            // ★ v1.3.7-93：有阈值的规则（浮亏 % / 分钟）多一个输入框 ✓
+            if (row.threshold_label) {
+                const limit = this._input(String(row.threshold ?? ''),
+                                          String(row.threshold_label || '阈值'));
+                limit.style.width = '110px';
+                limit.title = `${String(row.threshold_label || '阈值')}`
+                    + `（${String(row.threshold_unit || '')}）`;
+                limit.addEventListener('input', () => {
+                    const item = draft.get(id);
+                    if (item) item.threshold = Number(limit.value || 0);
+                });
+                control.appendChild(limit);
+            } else {
+                control.appendChild(wait);
+            }
+            box.append(icon, text, control);
+            this.body.appendChild(box);
+        }
+        }
+        const bar = document.createElement('div');
+        bar.className = 'desk-settings-buttons';
+        bar.appendChild(this._button('保存规则', () => {
+            this.options.onCommand('ops_alert_rules', {
+                action: 'save', rules: [...draft.values()],
+            });
+            this.options.onToast?.('success', '告警规则已保存');
+        }, true));
+        bar.appendChild(this._button('恢复默认', () => {
+            this.options.onCommand('ops_alert_rules', { action: 'reset' });
+        }));
+        this.body.appendChild(bar);
+
+        // ★ v1.3.7-94：静默时段 / 每日汇总（默认都关 ✓）
+        const settings = (this.notify.alert_settings || {}) as Record<string, any>;
+        const quiet = settings.quiet || {};
+        const digest = settings.digest || {};
+        const quietState: Record<string, any> = {
+            enabled: !!quiet.enabled,
+            allow: String(quiet.allow_level || 'error') };
+        const digestState = { enabled: !!digest.enabled };
+        this._section('静默时段 / 每日汇总');
+        const qStart = this._input(String(quiet.start || '23:00'), '23:00');
+        const qEnd = this._input(String(quiet.end || '08:00'), '08:00');
+        qStart.style.width = '90px';
+        qEnd.style.width = '90px';
+        const allow = this._select(
+            [{ value: 'error', label: '只推「严重」' },
+             { value: 'warning', label: '推「重要」以上' },
+             { value: 'info', label: '全都推' }],
+            String(quiet.allow_level || 'error'),
+            (value) => { quietState.allow = value; });
+        this._row('bell', '静默时段',
+            '这段时间里只推送选中的级别（比如半夜只推严重）',
+            this._switch(!!quiet.enabled, (checked) => {
+                quietState.enabled = checked;
+            }));
+        this._row('info', '静默起止', '支持跨零点（23:00 → 08:00）',
+            (() => {
+                const box = document.createElement('div');
+                box.className = 'desk-settings-inline';
+                box.append(qStart, document.createTextNode('→'), qEnd, allow);
+                return box;
+            })());
+        const digestAt = this._input(String(digest.at || '16:00'), '16:00');
+        digestAt.style.width = '90px';
+        this._row('bell', '每日汇总', '每天到点发一条，把当天命中 / 被压制的告警汇总',
+            this._switch(!!digest.enabled, (checked) => {
+                digestState.enabled = checked;
+            }));
+        this._row('info', '汇总时间', '默认 16:00（收盘后）',
+            digestAt);
+        // ★ v1.3.7-95：自定义资讯关键词
+        const keywordRow = document.createElement('div');
+        keywordRow.className = 'desk-settings-row';
+        const kIcon = document.createElement('span');
+        kIcon.className = 'desk-settings-icon';
+        kIcon.innerHTML = ICONS.bell;
+        const kText = document.createElement('div');
+        kText.className = 'desk-settings-text';
+        const kWords = ((settings.keywords || []) as string[]).join(',');
+        kText.innerHTML = '<div class="desk-settings-name">资讯关键词</div>'
+            + '<div class="desk-settings-desc">标题或摘要命中就推；'
+            + '多个用逗号分隔（如「降息,抛储,碳酸锂」）</div>';
+        const kInput = this._input(kWords, '降息, 抛储, 碳酸锂');
+        kInput.style.width = '260px';
+        const kControl = document.createElement('div');
+        kControl.className = 'desk-settings-inline';
+        kControl.append(kInput, this._button('保存关键词', () => {
+            this.options.onCommand('ops_alert_rules', {
+                action: 'settings',
+                keywords: kInput.value.trim(),
+            });
+            this.options.onToast?.('success', '资讯关键词已保存');
+        }));
+        keywordRow.append(kIcon, kText, kControl);
+        this.body.appendChild(keywordRow);
+
+        // ★ v1.3.7-95：账户净值曲线（回撤告警的依据）
+        this._renderEquityCurve();
+
+        const bar2 = document.createElement('div');
+        bar2.className = 'desk-settings-buttons';
+        bar2.appendChild(this._button('保存静默 / 汇总', () => {
+            this.options.onCommand('ops_alert_rules', {
+                action: 'settings',
+                quiet: { enabled: quietState.enabled,
+                         start: qStart.value.trim() || '23:00',
+                         end: qEnd.value.trim() || '08:00',
+                         allow_level: quietState.allow
+                             || String(quiet.allow_level || 'error') },
+                digest: { enabled: digestState.enabled,
+                          at: digestAt.value.trim() || '16:00' },
+            });
+            this.options.onToast?.('success', '静默 / 汇总设置已保存');
+        }, true));
+        this.body.appendChild(bar2);
+    }
+
+    /** 账户净值曲线（近 30 天；没有数据就提示"还没有采样" ✓） */
+    private _renderEquityCurve(): void {
+        const stats = (this.equity.stats || {}) as Record<string, any>;
+        this._section('账户净值曲线（近 30 天）');
+        const note = document.createElement('div');
+        note.className = 'desk-settings-note';
+        const points = (stats.points_list || []) as Array<[number, number]>;
+        if (!points.length) {
+            note.textContent = '还没有采样（要连上交易账户、跑一会儿才有点）；'
+                + '每 60 秒记一条。';
+            this.body.appendChild(note);
+            return;
+        }
+        note.textContent = `当前 ${Number(stats.current || 0).toFixed(0)}`
+            + ` · 峰值 ${Number(stats.peak || 0).toFixed(0)}`
+            + ` · 回撤 ${Number(stats.drawdown || 0).toFixed(1)}%`
+            + ` · 近 30 天最大回撤 ${Number(stats.max_drawdown || 0).toFixed(1)}%`
+            + ` · 今日 ${Number(stats.today_pnl || 0) >= 0 ? '+' : ''}${
+                Number(stats.today_pnl || 0).toFixed(0)}`;
+        this.body.appendChild(note);
+        const canvas = document.createElement('canvas');
+        canvas.className = 'desk-settings-equity';
+        canvas.width = 640;
+        canvas.height = 140;
+        this.body.appendChild(canvas);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        const values = points.map((row) => Number(row[1]) || 0);
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = max - min || 1;
+        const style = getComputedStyle(this.element);
+        const line = style.getPropertyValue('--desk-accent') || '#4c8dff';
+        const grid = style.getPropertyValue('--desk-border') || '#333';
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = grid;
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i += 1) {
+            const y = 8 + (canvas.height - 16) * i / 4;
+            ctx.beginPath();
+            ctx.moveTo(4, y);
+            ctx.lineTo(canvas.width - 4, y);
+            ctx.stroke();
+        }
+        ctx.strokeStyle = line;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        points.forEach((row, index) => {
+            const x = 4 + (canvas.width - 8) * (index / Math.max(1, points.length - 1));
+            const y = 8 + (canvas.height - 16)
+                * (1 - ((Number(row[1]) || 0) - min) / span);
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    }
+
+    private _input(value: string, placeholder: string,
+                   type = 'text'): HTMLInputElement {
+        const input = document.createElement('input');
+        input.className = 'desk-settings-input';
+        input.type = type;
+        input.value = value;
+        input.placeholder = placeholder;
+        input.style.width = '220px';
+        return input;
+    }
+
     private _renderAbout(): void {
         const version = this.options.version || '1.3.3';
         this._title('关于');
@@ -935,6 +1615,41 @@ export class SettingsPage {
             const next = input.value.trim();
             if (next === value.trim()) return;
             value = next;
+            onCommit(next);
+        };
+        input.addEventListener('change', commit);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+                commit();
+                (event.target as HTMLInputElement).blur();
+            }
+        });
+        return input;
+    }
+
+    /** 通用文本输入（AI 地址 / 模型 / 密钥都用它；回车保存 ✓） */
+    private _textInput(value: string, onCommit: (value: string) => void,
+                       placeholder = '', password = false,
+                       storeKey = ''): HTMLInputElement {
+        const input = document.createElement('input');
+        input.type = password ? 'password' : 'text';
+        input.className = 'desk-settings-input';
+        // ★ 后端没值 → 用本机缓存（用户填过就不该"消失" ✓）
+        input.value = value || (storeKey ? localAi(storeKey) : '');
+        input.placeholder = placeholder;
+        input.spellcheck = false;
+        if (storeKey) {
+            // 每一次输入都落本机：哪怕后端不认这个键也不会丢 ✓
+            input.addEventListener('input', () => {
+                saveLocalAi(storeKey, input.value);
+            });
+        }
+        const commit = (): void => {
+            const next = input.value.trim();
+            if (next === value.trim()) return;
+            value = next;
+            // ★ 记住原文：后端若没保存成功，重画时**不要把用户的字冲掉** ✓
+            input.dataset.dirty = '1';
             onCommit(next);
         };
         input.addEventListener('change', commit);

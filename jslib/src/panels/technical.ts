@@ -22,7 +22,15 @@ export type TaSignal = 'buy' | 'neutral' | 'sell';
 export interface TaRow {
     name: string;
     value?: number | string;
-    signal: TaSignal | string;
+    /** v1.3.7-73：兼容旧的 `buy/neutral/sell` 与新的 `1 / 0 / -1` */
+    signal?: TaSignal | string | number;
+    note?: string;
+}
+
+export interface TaGroup {
+    key: string;
+    label: string;
+    rows: TaRow[];
 }
 
 export interface TaData {
@@ -31,6 +39,8 @@ export interface TaData {
     counts?: { buy?: number; neutral?: number; sell?: number };
     oscillators?: TaRow[];
     moving_averages?: TaRow[];
+    /** v1.3.7-73：震荡 / 趋势 / 其他 三类（新面板用 ✓） */
+    groups?: TaGroup[];
 }
 
 export interface TaTheme {
@@ -74,10 +84,15 @@ const CSS = `
 .pylc-ta-col h4{margin:0;padding:5px 10px;font-size:11px;font-weight:600;color:var(--ta-muted);
   border-bottom:1px solid var(--ta-border);flex:0 0 auto}
 .pylc-ta-rows{overflow:auto;flex:1 1 auto;min-height:0;padding:2px 10px 6px}
-.pylc-ta-row{display:flex;align-items:center;justify-content:space-between;gap:8px;
-  font-size:11px;padding:2px 0;white-space:nowrap}
-.pylc-ta-row .v{color:var(--ta-muted);font-variant-numeric:tabular-nums}
-.pylc-ta-row .s{font-weight:600;min-width:34px;text-align:right}
+/* ★ v1.3.7-75：三列用 **grid 固定列宽**（以前 flex + space-between，
+   名称长短不同时中间数值列对不齐 ✗）；数值列**居中** ✓ */
+.pylc-ta-row{display:grid;grid-template-columns:minmax(0,1fr) 80px 46px;
+  align-items:center;column-gap:8px;font-size:11px;padding:2px 0;
+  white-space:nowrap}
+.pylc-ta-row > span:first-child{overflow:hidden;text-overflow:ellipsis}
+.pylc-ta-row .v{color:var(--ta-muted);text-align:center;
+  font-variant-numeric:tabular-nums}
+.pylc-ta-row .s{font-weight:600;text-align:right}
 .pylc-stack>.pylc-ta{height:auto;flex:1 1 auto;min-height:0}
 `;
 
@@ -199,9 +214,22 @@ export class TechnicalAnalysis {
 
         const tables = document.createElement('div');
         tables.className = 'pylc-ta-tables';
-        tables.appendChild(this._makeTable('振荡器 Oscillators', this._data.oscillators ?? []));
-        tables.appendChild(this._makeTable('移动平均 Moving Averages',
-                                           this._data.moving_averages ?? []));
+        const groups = this._data.groups ?? [];
+        if (groups.length) {
+            // ★ v1.3.7-73：三类（震荡 / 趋势 / 其他）—— 有就按 grouped 渲染 ✓
+            for (const group of groups) {
+                if (!group.rows || !group.rows.length) continue;
+                tables.appendChild(this._makeTable(group.label, group.rows));
+            }
+            if (!tables.childElementCount) {
+                tables.appendChild(this._makeTable('震荡指标', []));
+            }
+        } else {
+            tables.appendChild(this._makeTable('振荡器 Oscillators',
+                                               this._data.oscillators ?? []));
+            tables.appendChild(this._makeTable('移动平均 Moving Averages',
+                                               this._data.moving_averages ?? []));
+        }
         this.element.appendChild(tables);
     }
 
@@ -290,8 +318,15 @@ export class TechnicalAnalysis {
                 ? row.value.toFixed(this._decimals) : String(row.value ?? '—');
             const signal = document.createElement('span');
             signal.className = 's';
-            signal.style.color = this._signalColor(row.signal);
-            signal.textContent = String(row.signal);
+            const numeric = typeof row.signal === 'number'
+                ? row.signal
+                : ({ buy: 1, neutral: 0, sell: -1 } as Record<string, number>)[
+                    String(row.signal)] ?? 0;
+            signal.style.color = this._signalColor(
+                numeric > 0 ? 'buy' : (numeric < 0 ? 'sell' : 'neutral'));
+            signal.textContent = numeric > 0 ? '看多'
+                : (numeric < 0 ? '看空' : '中立');
+            if (row.note) signal.title = String(row.note);
             node.appendChild(name);
             node.appendChild(value);
             node.appendChild(signal);

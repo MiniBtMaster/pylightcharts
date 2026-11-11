@@ -76,7 +76,14 @@ def test_chart_and_local_chart_render_alert_lines_with_left_badge():
         assert 'private _placeAlertBadges()' in page
         assert 'desk-alert-badge' in page
         assert "item.line === false" in page
-        assert "badge.style.left = '8px'" in page
+        # ★ 标签要带**触发条件**：`预警 上穿 12680`（用户 2026-11-08）
+        assert "cross || '穿过'" in page
+        assert "${fired ? '已触发' : '预警'} ${cross} " in page
+        assert 'badge.dataset.cross = cross;' in page
+        # ★ 预警标签要贴在**可视范围**左边（= pane 的左沿），
+        #   不能写死 host 的 `8px`：桌面端左边还有工具架，会偏出去 ✗
+        assert "badge.style.left = '8px'" not in page
+        assert 'paneRect.left - hostRect.left + 8' in page
     css = _read(JSLIB / 'desk.css')
     assert '.desk-alert-badge' in css
 
@@ -88,3 +95,22 @@ def test_alert_line_is_removed_with_alert_list():
     assert 'this._renderAlertLines()' in set_alerts
     clear = page.split('clearAlerts(): void', 1)[1].split('}', 1)[0]
     assert 'this._renderAlertLines()' in clear
+
+
+def test_line_badges_share_one_left_edge():
+    """持仓线 / 挂单线 / 预警线三种标签必须**同一个左边**（pane 左沿 + 8）✓
+
+    用户截图 `tradingview/预警线没有对齐可视范围的左边.png`：预警标签贴在
+    host 的 8px（跑到工具架下面、可视范围左边外面），而持仓 / 挂单标签在
+    `paneRect.left - hostRect.left + 8` —— 两条线看着错开一格 ✗。
+    """
+    for name in ('chart-page.ts', 'local-chart-page.ts'):
+        page = _read(JSLIB / name)
+        # 预警标签的左边：优先用 pane 左沿
+        block = page.split('private _placeAlertBadges(', 1)[1].split(
+            'private _clear', 1)[0]
+        assert 'const left = paneRect ? paneRect.left - hostRect.left + 8 : 8;' \
+            in block, name
+        assert 'item.badge.style.left = `${left}px`;' in block, name
+        # 持仓线 / 挂单线本来就是按 pane 算的（对齐目标 ✓）
+        assert 'paneRect.left - hostRect.left + 8' in page, name

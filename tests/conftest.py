@@ -15,6 +15,15 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+# ★ v1.3.7-101：测试**绝不能**碰用户真实的 ops 目录（里面有公众号 token）——
+#   否则跑一次 pytest 就会往用户微信推一堆「策略启动:a」（用户实测 ✗）
+if not os.environ.get('MINIBT_DESK_OPS_DIR'):
+    import tempfile as _tempfile
+    os.environ['MINIBT_DESK_OPS_DIR'] = _tempfile.mkdtemp(prefix='minibt-pytest-ops-')
+# 说明：不设 `MINIBT_DESK_NO_NOTIFY`（通道单测需要真发到 mock urlopen）；
+# 隔离 ops 目录后，测试里的 Notifier 用的是**临时** notify.json（没有 token）
+# → 不会推到用户微信；再加上 `Notifier._muted()` 对「真实配置 + pytest」
+# 的双保险（v1.3.7-101）✓
 
 import pytest
 
@@ -125,6 +134,35 @@ def _isolate_user_state(tmp_path_factory):
     if original_stats is not None:
         indicator_stats.STATS_FILE = original_stats
         indicator_stats._CACHE.clear()
+
+
+@pytest.fixture(scope='session', autouse=True)
+def _isolate_desk_personal(tmp_path_factory):
+    """别让测试读 / 执行**用户真实**的个人指标脚本与本地数据（v1.3.7）。
+
+    `minibt.desk.personal.scan()` 会 `exec` `~/.minibt/personal/indicators/*.py`；
+    用户脚本里如果有临时文件操作，会把 pytest 的 capture 文件搞关 →
+    后面所有用例报 ``ValueError: I/O operation on closed file`` ✗。
+    这里把 desk 的个人目录 / 本地数据状态指到 tmp，和 miniqt 那边一致 ✓
+    """
+    try:
+        from minibt.desk import local_data, personal
+    except Exception:                          # pragma: no cover - 没装 desk
+        yield
+        return
+    root = tmp_path_factory.mktemp('desk-personal')
+    original = (personal.CONFIG_FILE, personal.PERSONAL_ROOT,
+                local_data.STATE_FILE)
+    personal.CONFIG_FILE = str(root / 'personal.json')
+    personal.PERSONAL_ROOT = str(root / 'personal')
+    local_data.STATE_FILE = str(root / 'local_state.json')
+    try:
+        from minibt.desk import user_prefs
+        user_prefs.PREFS_FILE = str(root / 'prefs.json')
+    except Exception:                          # pragma: no cover
+        pass
+    yield
+    personal.CONFIG_FILE, personal.PERSONAL_ROOT,         local_data.STATE_FILE = original
 
 
 @pytest.fixture(autouse=True)

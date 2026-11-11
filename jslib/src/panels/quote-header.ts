@@ -37,6 +37,8 @@ export interface QuoteHeaderTheme {
 
 export interface QuoteHeaderOptions extends QuoteHeaderData {
     decimals?: number;
+    /** 这些字段按**整数**显示（成交量 / 持仓量；默认空 = 用 decimals） */
+    intFields?: string[];
     compact?: boolean;
     colorScheme?: QuoteColorScheme;
     /** field order; default open/high/low/pre_close/volume/open_interest */
@@ -97,6 +99,7 @@ export class QuoteHeader {
 
     private _data: QuoteHeaderData;
     private _decimals: number;
+    private _intFields: string[];
     private _compact: boolean;
     private _scheme: QuoteColorScheme;
     private _fields: string[];
@@ -111,6 +114,7 @@ export class QuoteHeader {
     constructor(options: QuoteHeaderOptions = {}, parent?: HTMLElement | null) {
         ensureStyle(STYLE_ID, CSS);
         this._decimals = options.decimals ?? 0;
+        this._intFields = options.intFields ?? [];
         this._compact = options.compact ?? false;
         this._scheme = options.colorScheme ?? 'cn';
         this._fields = options.fields ?? DEFAULT_FIELDS.slice();
@@ -228,8 +232,12 @@ export class QuoteHeader {
             field.className = 'pylc-quote-field';
             field.textContent = LABELS[key] ?? key;
             const bold = document.createElement('b');
-            bold.textContent = key === 'volume' || key === 'open_interest'
-                ? this._formatCompact(value as number) : this._format(value as number);
+            const integer = this._intFields.includes(key);
+            bold.textContent = integer
+                ? Math.round(Number(value)).toLocaleString('en-US')
+                : (key === 'volume' || key === 'open_interest'
+                    ? this._formatCompact(value as number)
+                    : this._format(value as number));
             field.appendChild(bold);
             fields.appendChild(field);
         }

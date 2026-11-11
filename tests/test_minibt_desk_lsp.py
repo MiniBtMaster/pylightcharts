@@ -396,7 +396,8 @@ def test_editor_markdown_preview_and_symbols_ui():
     assert "this.previewButton = this._button('预览'" in panel
     assert 'desk-editor-preview' in panel
     assert 'private _syncPreview(): void {' in panel
-    assert "this._button('符号'" in panel
+    # v1.3.7：按钮名「符号」→「预览」（功能仍是跨文件符号搜索 ✓）
+    assert "this._button('预览', () => this._toggleSymbols())" in panel
     assert 'private _searchSymbols(query: string): void {' in panel
     assert 'data-symbol-path' in panel
     bundle = (ROOT / 'jslib' / 'src' / 'desk' / 'editor-bundle.ts').read_text(
@@ -475,18 +476,14 @@ def test_cross_file_definition_and_status_meta():
     assert 'UTF-8' in panel and 'LF' in panel
 
 
-def test_editor_diff_view():
-    """「对比」= 和磁盘版本 diff（@codemirror/merge 懒加载 ✓）"""
+def test_editor_diff_feature_removed():
+    """「对比」已按用户要求删除（v1.3.7-3：没什么用处）✓"""
     panel = (ROOT / 'jslib' / 'src' / 'desk' / 'editor-panel.ts').read_text(
         encoding='utf-8')
-    assert "this._button('对比'" in panel
-    assert "import('@codemirror/merge')" in panel
-    assert 'new MergeView({' in panel
-    assert 'a: { doc: tab.saved' in panel and 'b: { doc: tab.text' in panel
-    css = (ROOT / 'jslib' / 'src' / 'desk' / 'desk.css').read_text(encoding='utf-8')
-    assert '.desk-editor-diff {' in css
-    pkg = (ROOT / 'jslib' / 'package.json').read_text(encoding='utf-8')
-    assert '"@codemirror/merge"' in pkg
+    assert '对比' not in panel
+    assert '@codemirror/merge' not in panel
+    app = (ROOT / 'minibt' / 'desk' / 'app.py').read_text(encoding='utf-8')
+    assert 'editor_diff' not in app
 
 
 # --------------------------------------------------------------- P129
@@ -517,15 +514,24 @@ def test_ruff_rules_are_not_noisy():
 
 
 def test_status_bar_keeps_meta_and_badge():
-    """状态栏：正文 + 「行/列 · LF · UTF-8 · 缩进」+ LSP 徽标 同时都在 ✓"""
+    """状态栏：正文 + 「行/列 · LF · UTF-8 · 缩进」+ LSP 徽标 同时都在 ✓
+
+    ★ 2026-11-08：正文改成 `<span class="desk-editor-status-text">`（窄窗口可省略号），
+      其余子节点**整批保留并重新挂回**（不再靠 querySelector 逐个补）
+    """
     panel = (ROOT / 'jslib' / 'src' / 'desk' / 'editor-panel.ts').read_text(
         encoding='utf-8')
-    block = panel.split('private _writeStatus(text: string): void {', 1)[1] \
-        .split('}', 1)[0]
-    assert "querySelector('[data-meta]')" in block
-    assert "querySelector('[data-lsp]')" in block
-    assert 'this.status.appendChild(meta);' in block
-    assert 'this.status.appendChild(badge);' in block
+    block = panel.split('private _writeStatus(text: string): void {', 1)[1]         .split('private _ensureLspBadge', 1)[0]
+    # 正文用 span 包（裸文本节点不能 text-overflow: ellipsis）
+    assert 'desk-editor-status-text' in block
+    # 其余子节点（行/列元信息、实盘徽标、LSP 徽标）整批保住 ✓
+    assert 'Array.from(this.status.children)' in block
+    assert 'this.status.appendChild(child)' in block
+    assert 'this._ensureLspBadge();' in block
+    # 元信息 / 徽标仍由 _ensureLspBadge 创建（data-meta / data-lsp ✓）
+    ensure = panel.split('private _ensureLspBadge', 1)[1]
+    assert "meta.dataset.meta = '1';" in ensure
+    assert "badge.dataset.lsp = '1';" in ensure
 
 
 # --------------------------------------------------------------- P130

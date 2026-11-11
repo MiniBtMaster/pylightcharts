@@ -79,6 +79,13 @@ vscode-minibt/
 /design/
 /app/
 
+# ------------------------------------------- 第三方参考副本（不含本仓库代码）
+# `pi-web-main` / `Pi-Agent-Web-main` 是 Pi Agent Web 的上游源码副本（各有自己的
+# LICENSE），只在本地对读，**不随本仓库上传**；`minibt-strategy` 是兄弟仓库 ✓
+pi-web-main/
+Pi-Agent-Web-main/
+minibt-strategy/
+
 # ------------------------------------------------------------ 运行时产物
 *.log
 /test/

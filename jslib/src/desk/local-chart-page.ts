@@ -254,6 +254,8 @@ export class LocalChartPage {
     private readonly typedSeries = new Map<unknown, unknown>();
     /** 每格的合约 / K 线（布局多图用 ✓） */
     private readonly cellSymbols: string[] = [];
+    /** 每格周期（多布局时每格可以不同 ✓） */
+    private readonly cellCycles: number[] = [];
     private readonly cellBars: ChartBar[][] = [];
     /** 回放 */
     private replay: Replay | null = null;
@@ -491,6 +493,11 @@ export class LocalChartPage {
         const indicatorButton = this._toolButton('指标', (button) => {
             this.openIndicatorMenu(button);
         }, '技术指标（★ 收藏 / 更多指标和策略 / 个人指标）');
+        // ★ v1.3.7-77：工具栏「＋」= **更多指标和策略** 快捷入口 ✓
+        const addIndicatorButton = this._toolButton(
+            '＋', () => this.openIndicatorPicker(),
+            '更多指标和策略');
+        addIndicatorButton.classList.add('desk-tool-add');
         const templateButton = this._toolButton('模板', () => {
             this.openTemplatePicker();
         }, '指标模板（保存 / 应用当前 CSV 的指标组合）');
@@ -569,7 +576,8 @@ export class LocalChartPage {
         // 本地图表：无模板 / 布局 / 联动 / 二级报价 / 浮动买卖盘
         //（交易控件移到底部「交易账户」页，见 _buildLocalTicket ✓）
         toolbar.append(symbol, this._separator(), cycleButton, kindButton,
-                       indicatorButton, templateButton,
+                       indicatorButton, addIndicatorButton,
+                       templateButton,
                        this._separator(), alertButton, playButton,
                        spacer,
                        ...(options.tvKey ? [starButton] : []),
@@ -1377,12 +1385,20 @@ export class LocalChartPage {
     }
 
     /** 画线工具箱（LWC 的 TrendLine/Fib/Measure…）开关 ✓ */
-    toggleToolBox(): void {
+    toggleToolBox(): boolean {
         this.toolBoxOn = !this.toolBoxOn;
         this._drawings().refresh();
         this._applyToolBoxMode();
         this.resize();                   // 左侧多出一条 → 图表要重排 ✓
+        return this.toolBoxOn;
     }
+
+    /** 显式开关画线工具箱（PI 工具 `desk_drawings{{action:"toolbox"}}` ✓） */
+    setToolBox(on: boolean): boolean {{
+        const target = !!on;
+        if (this.toolBoxOn !== target) this.toggleToolBox();
+        return this.toolBoxOn;
+    }}
 
     /** 应用「画线」开关：左侧导航条显隐 + 当前格工具箱搬进/搬出 ✓ */
     private _applyToolBoxMode(): void {
@@ -1452,6 +1468,20 @@ export class LocalChartPage {
                     symbol: this.symbolForCell(this.activeCell), local: true,
                     cell: this.activeCell,
                 }),
+            // ★ 工具栏入口也进右键（用户 2026-11-08）
+            onMoreIndicators: () => this.options.onCommand?.(
+                'indicator_picker', {
+                    symbol: this.symbolForCell(this.activeCell),
+                    cell: this.activeCell,
+                }),
+            onTemplates: () => this.openTemplatePicker(),
+            onStrategyManage: () => this.options.onCommand?.(
+                'strategy_manage', {}),
+            onSaveLayout: () => this.openSaveLayout(),
+            onSymbolInfo: () => this.options.onCommand?.('open_symbol_info', {
+                symbols: this.cellSymbols.filter(Boolean),
+                active: this.symbolForCell(this.activeCell),
+            }),
             onAddFavorite: (key) => this.options.onAddIndicator?.(key, {}),
             // ★ 右键「我的模板 / 保存当前指标模板」：和工具栏「模板」同一条命令 ✓
             onApplyTemplate: (key) => this.applyTemplate(key),
@@ -1647,6 +1677,9 @@ export class LocalChartPage {
         this._setSeriesData();
         this._updateLegend(this.bars[this.bars.length - 1]);
         this._placePositionBadge();
+        // ★ 新 K 线到位 → 顺手要一次技术分析信号（10s 节流 ✓）
+        this.requestTaSignal();
+
     }
 
     /** 收藏列表（后端 `favorites` 补丁 → 工具栏下拉 ✓） */
@@ -1657,6 +1690,14 @@ export class LocalChartPage {
     }
 
     /** 「指标」下拉：★ 收藏指标 / 收藏策略 / ＋更多… / 添加个人…（同 miniqt ✓） */
+    /** 「＋」快捷入口：直接打开 pylightcharts 指标 / 策略选择器 ✓ */
+    openIndicatorPicker(): void {
+        this.options.onCommand?.('indicator_picker', {
+            symbol: this.symbolForCell(this.activeCell),
+            cell: this.activeCell,
+        });
+    }
+
     openIndicatorMenu(anchor: HTMLElement): void {
         const favorites = this.options.favorites || [];
         const strategies = this.options.strategyFavorites || [];
@@ -2282,6 +2323,17 @@ export class LocalChartPage {
         if (!name) return;
         // ★ 带上 `page`：后端回补丁时带上它，App 才能把 K 线 / 指标发到
         //   **这一页**（多开本地图表时按 CSV 名找不到——这页还没加载过它 ✗）
+        // ★ 同一页换数据集（CSV → CSV）：走 `local_switch`（保留布局 / 指标，
+        //   以前发 `switch_symbol` 会被当成实时行情 → 报「切换合约失败」✗）
+        if (this.localName && this.localName !== name) {
+            this.options.onCommand?.('local_switch', {
+                page: this.options.pageId || '',
+                from: this.localName,
+                to: name,
+                cell: this.activeCell,
+            });
+            return;
+        }
         this.options.onCommand?.('local_load', {
             name, cell: this.activeCell,
             page: this.options.pageId || '',
@@ -2527,7 +2579,357 @@ export class LocalChartPage {
         });
     }
 
-    /** 右键「全部K线」：可视范围刚好显示全部 ✓ */
+    /** 标的专属事件（`info_symbol_events` 补丁）→ 顶部圆点 ✓ */
+    private symbolEvents: Array<Record<string, unknown>> = [];
+    /** 上次画上去的圆点数量（0 = 没有 / 画失败；自查用 ✓） */
+    calendarMarkerCount = 0;
+    /** 圆点 DOM（顶部对齐可视区，无文字；tooltip 显示内容 ✓） */
+    private readonly calBadges: HTMLDivElement[] = [];
+    /** 可视区变化 → 重新摆放（rAF 节流） */
+    private calFrame = 0;
+    private calBound = false;
+
+    /**
+     * 标的专属事件 → **可视范围顶部**的圆点（用户 2026-11-08 ✓）
+     *
+     * 不用 LWC markers（那是贴着 K 线画的，缩放后会跑到图中间 ✗）；
+     * 用 DOM 徽标：`timeToCoordinate` 算 x，纵向固定贴 pane 顶部。
+     */
+    setSymbolEvents(items: Array<Record<string, unknown>>): void {
+        this.symbolEvents = (items || []).slice(0, 40);
+        this._renderSymbolBadges();
+    }
+
+    /** 兼容旧调用：宏观日历**不上图**（只有标的专属事件才打点 ✓） */
+    setCalendarEvents(_items: Array<Record<string, unknown>>): void {
+        /* 用户 2026-11-08：宏观事件不上图 */
+    }
+
+    private _renderSymbolBadges(): void {
+        for (const badge of this.calBadges) badge.remove();
+        this.calBadges.length = 0;
+        const handler = this.cells[0] as unknown as {
+            chart?: {
+                timeScale?: () => { timeToCoordinate?: (time: number) =>
+                    number | null };
+                panes?: () => Array<{ getHTMLElement?: Function }>;
+            };
+        } | undefined;
+        const chart = handler?.chart;
+        const scale = chart?.timeScale?.();
+        const bars = (this.cellBars[0] && this.cellBars[0].length
+            ? this.cellBars[0] : this.bars) as Array<{ time: number }>;
+        const events = this.symbolEvents || [];
+        if (!scale || !bars.length || !events.length) {
+            this.calendarMarkerCount = 0;
+            return;
+        }
+        this._bindCalendar();
+        const pane = chart?.panes?.()?.[0]?.getHTMLElement?.();
+        const paneRect = pane?.getBoundingClientRect();
+        const hostRect = this.element.getBoundingClientRect();
+        const dayStart = new Map<string, number>();
+        for (const bar of bars) {
+            const stamp = new Date(bar.time * 1000);
+            const day = `${stamp.getFullYear()}-`
+                + `${String(stamp.getMonth() + 1).padStart(2, '0')}-`
+                + `${String(stamp.getDate()).padStart(2, '0')}`;
+            if (!dayStart.has(day)) dayStart.set(day, bar.time);
+        }
+        // ★ 顶部坐标：pane 顶部 + 4px（缩放 / 拖动都贴顶 ✓）
+        const top = paneRect ? paneRect.top - hostRect.top + 4 : 4;
+        const leftBase = paneRect ? paneRect.left - hostRect.left : 0;
+        // ★ 按天分组：一个圆点 = 那一天**所有**事件（悬停弹卡片看全部 ✓）
+        const groups = new Map<string, Array<Record<string, unknown>>>();
+        for (const item of events) {
+            const day = String(item.day || '');
+            if (!day) continue;
+            if (!groups.has(day)) groups.set(day, []);
+            groups.get(day)!.push(item);
+        }
+        for (const [day, rows] of groups) {
+            const time = dayStart.get(day);
+            if (time === undefined) continue;
+            const x = scale.timeToCoordinate?.(time);
+            if (x === null || x === undefined) continue;
+            const badge = document.createElement('div');
+            badge.className = 'desk-cal-badge';
+            const first = rows[0] || {};
+            // ★ 用户 2026-11-08：旧 tooltip 关掉（已有悬停卡片 Top Stories ✓）
+            badge.removeAttribute('title');
+            badge.dataset.day = day;
+            badge.style.left = `${leftBase + x}px`;
+            badge.style.top = `${top}px`;
+            if (String(first.kind || '') === 'notice') {
+                badge.classList.add('notice');
+            }
+            this._bindCalPopover(badge, day, rows);
+            this.element.appendChild(badge);
+            this.calBadges.push(badge);
+        }
+        this.calendarMarkerCount = this.calBadges.length;
+    }
+
+    /** 重新请求标的专属事件（改「全部事件」开关后调用 ✓） */
+    refreshSymbolEvents(): void {
+        const symbol = this.options.symbol || '';
+        const pageId = String((this.options as { pageId?: string }).pageId
+            || '');
+        if (!symbol) return;
+        this.options.onCommand?.('info_symbol_events',
+                                 { symbol, page: pageId });
+    }
+
+
+    /** 悬停圆点 → 当日事件卡片（东财那种，内容放得下 ✓ 用户 2026-11-08） */
+    private _bindCalPopover(badge: HTMLDivElement, day: string,
+                            rows: Array<Record<string, unknown>>): void {
+        let pop: HTMLDivElement | null = null;
+        let hideTimer = 0;
+        const hide = () => {
+            hideTimer = window.setTimeout(() => {
+                pop?.remove();
+                pop = null;
+            }, 160);
+        };
+        const show = () => {
+            if (pop) { window.clearTimeout(hideTimer); return; }
+            pop = document.createElement('div');
+            pop.className = 'desk-cal-pop';
+            const head = document.createElement('div');
+            head.className = 'pop-head';
+            head.textContent = `${day} · ${rows.length} 条事件`;
+            pop.appendChild(head);
+            for (const row of rows.slice(0, 12)) {
+                const line = document.createElement('div');
+                line.className = 'pop-row';
+                const time = document.createElement('i');
+                time.textContent = String(row.time || '');
+                const text = document.createElement('span');
+                text.textContent = String(row.text || '');
+                if (Number(row.importance || 0) >= 2) {
+                    line.classList.add('high');
+                }
+                line.append(time, text);
+                pop.appendChild(line);
+            }
+            const rect = badge.getBoundingClientRect();
+            const hostRect = this.element.getBoundingClientRect();
+            pop.style.left = `${Math.max(8, rect.left - hostRect.left - 10)}px`;
+            pop.style.top = `${rect.top - hostRect.top + 16}px`;
+            pop.addEventListener('mouseenter',
+                                  () => window.clearTimeout(hideTimer));
+            pop.addEventListener('mouseleave', hide);
+            this.element.appendChild(pop);
+        };
+        badge.addEventListener('mouseenter', show);
+        badge.addEventListener('mouseleave', hide);
+    }
+
+    /**
+     * 资讯 ↔ 图表联动：跳到某条新闻的时间，并**高亮**那一根 K 线 ✓
+     *
+     * `seconds` = 新闻时间（unix 秒）；找不到就取最近的一根。
+     */
+    focusTime(seconds: number, label = ''): void {
+        const value = Number(seconds);
+        if (!Number.isFinite(value) || value <= 0) return;
+        const bars = (this.cellBars[0] && this.cellBars[0].length
+            ? this.cellBars[0] : this.bars) as Array<{ time: number }>;
+        if (!bars.length) return;
+        let index = 0;
+        let delta = Infinity;
+        bars.forEach((bar, position) => {
+            const diff = Math.abs(Number(bar.time) - value);
+            if (diff < delta) {
+                delta = diff;
+                index = position;
+            }
+        });
+        const scale = (this.cells[0] as unknown as {
+            chart?: { timeScale?: () => {
+                setVisibleLogicalRange?: (range: { from: number; to: number })
+                    => void;
+                timeToCoordinate?: (time: number) => number | null;
+            } };
+        } | undefined)?.chart?.timeScale?.();
+        // 让目标落在可视区中间偏右（前后各留一点上下文 ✓）
+        try {
+            scale?.setVisibleLogicalRange?.({
+                from: Math.max(0, index - 40), to: index + 12,
+            });
+        } catch { /* ignore */ }
+        // 高亮：在那一根上面放一个徽标（4 秒后自动消失 ✓）
+        const badge = document.createElement('div');
+        badge.className = 'desk-news-pin';
+        badge.textContent = label ? `${label}` : '资讯';
+        this.element.appendChild(badge);
+        const place = () => {
+            const rect = badge.getBoundingClientRect();
+            const host = this.element.getBoundingClientRect();
+            const x = scale?.timeToCoordinate?.(bars[index].time);
+            if (x === null || x === undefined) return;
+            badge.style.left = `${Math.max(8, x - rect.width / 2)}px`;
+            badge.style.top = `${host.height * 0.18}px`;
+        };
+        place();
+        window.setTimeout(place, 60);
+        window.setTimeout(() => badge.remove(), 4200);
+    }
+
+    /** 技术分析信号徽标（`ta_signals` 补丁 → 最后一根 K 线旁 ✓） */
+    private taBadge: HTMLDivElement | null = null;
+    private taAskedAt = 0;
+
+    /**
+     * 显示技术分析信号（1 多 / 0 中立 / -1 空）：贴在**最后一根** K 线附近
+     *
+     * `data` = `{score, counts, groups}`（来自 `ta_signals`）✓
+     */
+    setTaSignal(data: Record<string, unknown>): void {
+        this.taBadge?.remove();
+        this.taBadge = null;
+        if (this._taBadgeOff()) return;
+        const rows: Array<Record<string, unknown>> = [];
+        for (const group of (data.groups || []) as Array<
+            Record<string, unknown>>) {
+            for (const row of (group.rows || []) as Array<
+                Record<string, unknown>>) {
+                rows.push({ ...row, group: group.label });
+            }
+        }
+        if (!rows.length) return;
+        const counts = (data.counts || {}) as Record<string, number>;
+        const score = Number(data.score || 0);
+        const tone = score > 0.15 ? 'buy' : (score < -0.15 ? 'sell'
+            : 'neutral');
+        const badge = document.createElement('div');
+        badge.className = `desk-ta-badge ${tone}`;
+        badge.textContent = tone === 'buy' ? `TA 多 ${counts.buy || 0}`
+            : (tone === 'sell' ? `TA 空 ${counts.sell || 0}`
+                : `TA 中立 ${counts.neutral || 0}`);
+        // ★ v1.3.7-99/100：固定图表右上角 + 悬停卡片（不用原生 title ✓）
+        badge.removeAttribute('title');
+        const host = this.cellElements[0] || this.element;
+        host.appendChild(badge);
+        this.taBadge = badge;
+        this._bindTaPopover(badge, rows, counts, score);
+        // ★ v1.3.7-104：有指标"数据不足"（K 线还不够）→ 8 秒后**自动再算一次**
+        //   （第一次打开图表常遇到；补上数据后卡片就正常了 ✓）
+        if (data.retry) {
+            window.setTimeout(() => this.requestTaSignal(true), 8000);
+        }
+    }
+
+    /** 徽标开关（设置项 `ta_badge`；没设过 = 开 ✓） */
+    private _taBadgeOff(): boolean {
+        const values = (window as unknown as {
+            __desk?: { settingsValues?: Record<string, unknown> };
+        }).__desk?.settingsValues || {};
+        return values.ta_badge === false;
+    }
+
+
+    /** 悬停技术分析徽标 → 指标明细卡片（复用 `.desk-cal-pop` 样式 ✓） */
+    private _bindTaPopover(badge: HTMLDivElement,
+                           rows: Array<Record<string, unknown>>,
+                           counts: Record<string, number>,
+                           score: number): void {
+        let pop: HTMLDivElement | null = null;
+        let hideTimer = 0;
+        const hide = () => {
+            hideTimer = window.setTimeout(() => {
+                pop?.remove();
+                pop = null;
+            }, 160);
+        };
+        const show = () => {
+            if (pop) {
+                window.clearTimeout(hideTimer);
+                return;
+            }
+            pop = document.createElement('div');
+            pop.className = 'desk-cal-pop desk-ta-pop';
+            const head = document.createElement('div');
+            head.className = 'pop-head';
+            head.textContent = `技术分析 · ${rows.length} 项`
+                + `（多 ${counts.buy || 0} / 空 ${counts.sell || 0}`
+                + ` / 中立 ${counts.neutral || 0}）`
+                + `　评分 ${score.toFixed(2)}`;
+            pop.appendChild(head);
+            for (const row of rows.slice(0, 14)) {
+                const value = Number(row.signal || 0);
+                const line = document.createElement('div');
+                line.className = 'pop-row'
+                    + (value > 0 ? ' buy' : (value < 0 ? ' sell' : ''));
+                const name = document.createElement('i');
+                name.textContent = String(row.name || row.key || '');
+                const text = document.createElement('span');
+                text.textContent = (value > 0 ? '看多'
+                    : (value < 0 ? '看空' : '中立'))
+                    + `　${row.value ?? '-'}`
+                    + (row.note ? `　${row.note}` : '');
+                line.append(name, text);
+                pop.appendChild(line);
+            }
+            const rect = badge.getBoundingClientRect();
+            const hostRect = this.element.getBoundingClientRect();
+            // 卡片对齐到**图表格子**的右边界（右边还有账户面板时不会被遮住 ✓）
+            const cellRect = (badge.parentElement || this.element)
+                .getBoundingClientRect();
+            pop.style.top = `${rect.bottom - hostRect.top + 6}px`;
+            this.element.appendChild(pop);
+            const width = pop.offsetWidth || 240;
+            const minLeft = cellRect.left - hostRect.left + 6;
+            const maxLeft = cellRect.right - hostRect.left - width - 6;
+            pop.style.left = `${Math.max(8, Math.max(minLeft,
+                Math.min(rect.right - hostRect.left - width, maxLeft)))}px`;
+            pop.addEventListener('mouseenter',
+                                  () => window.clearTimeout(hideTimer));
+            pop.addEventListener('mouseleave', hide);
+        };
+        badge.addEventListener('mouseenter', show);
+        badge.addEventListener('mouseleave', hide);
+    }
+
+    /** 请求一次技术分析信号（10 秒节流，别每次补丁都算 ✓） */
+    requestTaSignal(force = false): void {
+        const now = Date.now();
+        if (!force && now - this.taAskedAt < 10000) return;
+        this.taAskedAt = now;
+        const symbol = this.options.symbol || '';
+        if (!symbol) return;
+        this.options.onCommand?.('ta_signals', {
+            symbol, page: String((this.options as { pageId?: string }).pageId
+                || ''),
+        });
+    }
+
+    /** 缩放 / 拖动 / 改窗口 → 圆点跟着重排（每帧最多一次 ✓） */
+    private _bindCalendar(): void {
+        if (this.calBound) return;
+        const chart = (this.cells[0] as unknown as {
+            chart?: { timeScale?: () => {
+                subscribeVisibleLogicalRangeChange?: (fn: () => void) => void;
+            } };
+        } | undefined)?.chart;
+        const scale = chart?.timeScale?.();
+        if (!scale?.subscribeVisibleLogicalRangeChange) return;
+        this.calBound = true;
+        scale.subscribeVisibleLogicalRangeChange(() => {
+            if (this.calFrame) return;
+            this.calFrame = window.requestAnimationFrame(() => {
+                this.calFrame = 0;
+                this._renderSymbolBadges();
+            });
+        });
+    }
+
+    /** 这一格一共加载了多少根 K 线（PI 工具 `desk_bars` 回执用 ✓） */
+    barsCount(cell = 0): number {
+        return (this.cellBars[Math.max(0, Number(cell) || 0)] || []).length;
+    }
+
     fitAllBars(cell = 0): void {
         const scale = (this.cells[cell] as unknown as {
             chart?: { timeScale?: () => { fitContent?: () => void } };
@@ -2613,9 +3015,12 @@ export class LocalChartPage {
     }
 
     /** 第 N 格的 K 线（后端 `{type:'kline', cell:n}` ✓） */
-    setCellBars(index: number, bars: ChartBar[], replace = true): void {
+    setCellBars(index: number, bars: ChartBar[], replace = true,
+                 cycle?: number): void {
         const cell = Math.max(0, Math.min(Number(index) || 0,
                                          this.cells.length - 1));
+        // ★ 后端连每格周期一起发下来 → 记住它（切格时按钮跟着变 ✓）
+        if (cycle !== undefined) this.adoptCellCycle(cell, Number(cycle));
         if (cell === 0) {
             this.setBars(bars, replace);
             return;
@@ -2625,6 +3030,28 @@ export class LocalChartPage {
         this._applyCellBars(cell);
         this._updateLegend(this.cellBars[cell][this.cellBars[cell].length - 1],
                            cell);
+    }
+
+    /**
+     * 采纳后端带回来的某格周期（`kline{cycle}` / `layout{cycles}` ✓）
+     *
+     * 只**记住**，不触发切换（避免和用户主动切周期打回声）；
+     * 本地图表的周期由数据决定 → 这里只记录（UI 不显示每格周期 ✓）
+     */
+    adoptCellCycle(cell: number, cycle: number): void {
+        const index = Math.max(0, Math.min(Number(cell) || 0,
+                                         Math.max(0, this.cells.length - 1)));
+        const value = Number(cycle);
+        if (!Number.isFinite(value) || value <= 0) return;
+        this.cellCycles[index] = value;
+        if (index === 0) this.cycle = value;
+    }
+
+    /** 某一格的周期（没单独设过 → 页面周期 ✓） */
+    cycleOfCell(cell = 0): number {
+        const value = Number(this.cellCycles[cell]);
+        if (Number.isFinite(value) && value > 0) return value;
+        return Number(this.cycle) || 60;
     }
 
     private _applyCellBars(index: number): void {
@@ -4267,9 +4694,52 @@ export class LocalChartPage {
             alert.fired = true;
             this.toast(`预警触发：${alert.message || this.options.symbol}`
                 + ` @ ${price}`);
+            this._fireLocalAlertAction(alert, price);
         }
         this.alertDialog?.setItems(this.localAlerts as never);
         this._renderAlertLines();
+    }
+
+    /**
+     * 预警触发后的**交易动作**（本地图表 → 本地模拟账户 ✓）
+     *
+     * 用户 2026-11-08：以前本地预警只弹 toast，「买入 / 卖出 / 平仓」根本没执行 ✗。
+     * 这里按 alert.action 走 `local_order`（后端 local_sim 记账，不动真账户）✓
+     */
+    private _fireLocalAlertAction(
+        alert: Record<string, unknown>, price: number): void {
+        const action = String(alert.action || 'none').toLowerCase();
+        if (!['buy', 'sell', 'close'].includes(action)) return;
+        const symbol = String(alert.symbol || this.tradeSymbol
+            || this.localName || '');
+        if (!symbol) return;
+        const qty = Math.max(1, Number(alert.qty) || 1);
+        // 平仓：按当前持仓方向平（多 → 卖平，空 → 买平；无持仓则跳过）
+        let side = action === 'sell' ? 'sell' : 'buy';
+        let offset = 'open';
+        if (action === 'close') {
+            if (!this.localNet) {
+                this.toast('预警触发平仓，但本地模拟没有持仓');
+                return;
+            }
+            side = this.localNet > 0 ? 'sell' : 'buy';
+            offset = 'close';
+        }
+        this.options.onCommand?.('local_order', {
+            symbol, side, offset, volume: qty, qty,
+            price: Number(price) || 0,
+            account: 'local',
+            label: '预警触发',
+        });
+        this.toast(`预警触发 → ${this.labelOfAction(action)} ${qty} 手`
+            + '（本地模拟）');
+    }
+
+    private labelOfAction(action: string): string {
+        if (action === 'buy') return '买开';
+        if (action === 'sell') return '卖开';
+        if (action === 'close') return '平仓';
+        return action;
     }
 
     /** 截图：LWC 自带 `takeScreenshot()` → 直接下 PNG ✓ */
@@ -4289,6 +4759,37 @@ export class LocalChartPage {
         link.download = `${this.options.symbol.replace(/[.\/]/g, '_')}.png`;
         link.href = canvas.toDataURL('image/png');
         link.click();
+    }
+
+    /**
+     * 截图（PI 工具 `desk_screenshot`）：把 dataURL **发回后端**落盘 ✓
+     *
+     * `screenshot()` 是工具栏按钮用的（下载 PNG，QtWebEngine 里没反应 ✗），
+     * 工具需要的是回执 → 以前只能超时 ✗
+     */
+    captureScreenshot(name?: string): void {
+        try {
+            const canvas = this._canvasShot();
+            if (!canvas) {
+                this.options.onCommand?.('screenshot', {
+                    dataUrl: '', page: this.options.pageId || '',
+                    error: '当前图表不支持截图（takeScreenshot 不可用）',
+                });
+                return;
+            }
+            this.options.onCommand?.('screenshot', {
+                dataUrl: canvas.toDataURL('image/png'),
+                page: this.options.pageId || '',
+                name: (name && String(name))
+                    || `${(this.options.symbol || 'chart')
+                        .replace(/[.\/]/g, '_')}.png`,
+            });
+        } catch (error) {
+            this.options.onCommand?.('screenshot', {
+                dataUrl: '', page: this.options.pageId || '',
+                error: `前端截图出错：${String(error)}`,
+            });
+        }
     }
 
     /** 当前格的 LWC canvas（`takeScreenshot()`）✓ */
@@ -4864,7 +5365,20 @@ export class LocalChartPage {
         this._ensureTickets();
         this.tickets[this._cellIndex(cell)]?.setNet(net);
         // ★ 交易面板四按钮按**多 / 空持仓**切换（锁仓 = 两边都 > 0 ✓）
-        this.localTicket?.setPosition(long, short);
+        //   但只看**当前交易标的**那一格：以前每格的持仓都往上写 →
+        //   点第 2 格时「无持仓 / 空仓」两组随每拍补丁来回跳 ✗（用户 2026-11-08）
+        if (this._isTradeCell(cell)) {
+            this.localTicket?.setPosition(long, short);
+        }
+    }
+
+    /** 这一格是不是**当前交易标的**所在的格（没有标的时第 1 格算 ✓） */
+    private _isTradeCell(cell: number): boolean {
+        const index = this._cellIndex(cell);
+        const focus = this.tradeSymbol || this.localName || this.options.symbol;
+        const symbol = this.cellSymbols[index] || (index === 0 ? focus : '');
+        if (!focus) return index === 0;
+        return !!symbol && symbol === focus;
     }
 
     /** 导出历史（`app.ts` 收到 `exports` 补丁时分发过来 ✓） */
@@ -5288,9 +5802,13 @@ export class LocalChartPage {
             }
             const badge = document.createElement('div');
             badge.className = 'desk-alert-badge';
-            const text = `${fired ? '已触发' : '预警'} ${price.toFixed(
+            // ★ 同上：标签带触发条件（穿过 / 上穿 / 下穿 ✓）
+            const cross = String(
+                (item as { cross?: string }).cross || '穿过');
+            const text = `${fired ? '已触发' : '预警'} ${cross} ${price.toFixed(
                 this.localDecimals)}`;
             badge.textContent = text;
+            badge.dataset.cross = cross;
             badge.title = item.message ? String(item.message) : text;
             badge.style.borderColor = color;
             badge.style.color = color;
@@ -5310,13 +5828,18 @@ export class LocalChartPage {
         const pane = cell?.chart?.panes?.()?.[0]?.getHTMLElement?.();
         const paneRect = pane?.getBoundingClientRect();
         const hostRect = this.element.getBoundingClientRect();
+        // ★ 左边要按 **pane** 算，不能写死 `8px`：桌面端图表左边还有工具栏 /
+        //   工具架，host 的 8px 会跑到可视范围外面（用户截图
+        //   `预警线没有对齐可视范围的左边.png` ✗）；持仓线 / 挂单线一直是
+        //   `paneRect.left - hostRect.left + 8`，预警线要跟它们对齐 ✓
+        const left = paneRect ? paneRect.left - hostRect.left + 8 : 8;
         for (const item of this.alertLines) {
             const y = cell?.series?.priceToCoordinate?.(item.price);
             if (y === null || y === undefined || !paneRect) {
                 item.badge.style.display = 'none';
                 continue;
             }
-            item.badge.style.left = '8px';
+            item.badge.style.left = `${left}px`;
             item.badge.style.top =
                 `${paneRect.top - hostRect.top + y - 9}px`;
             item.badge.style.display = '';

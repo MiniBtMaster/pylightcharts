@@ -120,6 +120,10 @@ export class AlertDialog {
     private readonly messageInput: HTMLInputElement;
     private readonly qtyInput: HTMLInputElement;
     private cross = '穿过';
+    /** 条件类型：price（默认）/ signal（指标信号 ✓ v1.3.7-74） */
+    private kind: 'price' | 'signal' = 'price';
+    private signalKey = '';
+    private signalOp = 'buy';
     private action = '无操作';
     private expire = 86400;
     /** 「预警线」默认开启（用户要求 ✓） */
@@ -152,6 +156,57 @@ export class AlertDialog {
 
         this.body = document.createElement('div');
         this.body.className = 'pylc-al-body';
+
+        // ★ 条件类型（价格 / 指标信号 ✓ v1.3.7-74）
+        const kindRow = document.createElement('div');
+        kindRow.className = 'pylc-al-row';
+        kindRow.innerHTML = '<span class="k">类型</span>';
+        const kindPrice = document.createElement('button');
+        kindPrice.className = 'pylc-al-chip on';
+        kindPrice.textContent = '价格到价';
+        const kindSignal = document.createElement('button');
+        kindSignal.className = 'pylc-al-chip';
+        kindSignal.textContent = '指标信号';
+        kindRow.append(kindPrice, kindSignal);
+
+        // 指标信号：key + 期望信号（看多 / 看空 / 中立）
+        const signalRow = document.createElement('div');
+        signalRow.className = 'pylc-al-row';
+        signalRow.style.display = 'none';
+        signalRow.innerHTML = '<span class="k">指标</span>';
+        const keyInput = document.createElement('input');
+        keyInput.className = 'pylc-al-input';
+        keyInput.placeholder = '指标 key（如 pta_rsi）';
+        const opSelect = document.createElement('select');
+        opSelect.className = 'pylc-al-input';
+        for (const [label, value] of [['看多', 'buy'], ['看空', 'sell'],
+                                      ['中立', 'neutral']]) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = label;
+            opSelect.appendChild(option);
+        }
+        signalRow.append(keyInput, opSelect);
+
+        const syncKind = (kind: 'price' | 'signal'): void => {
+            this.kind = kind;
+            const isSignal = kind === 'signal';
+            kindPrice.classList.toggle('on', !isSignal);
+            kindSignal.classList.toggle('on', isSignal);
+            condRow.style.display = isSignal ? 'none' : '';
+            signalRow.style.display = isSignal ? '' : 'none';
+            this._syncMessage();
+        };
+        kindPrice.addEventListener('click', () => syncKind('price'));
+        kindSignal.addEventListener('click', () => syncKind('signal'));
+        keyInput.addEventListener('input', () => {
+            this.signalKey = keyInput.value.trim();
+            this._syncMessage();
+        });
+        opSelect.addEventListener('change', () => {
+            this.signalOp = opSelect.value;
+            this._syncMessage();
+        });
 
         // 价格 + 方向 + 数值
         const condRow = document.createElement('div');
@@ -265,7 +320,8 @@ export class AlertDialog {
         this.list = document.createElement('div');
         this.list.className = 'pylc-al-list';
 
-        this.body.append(condRow, expireRow, messageRow, actionRow, lineRow,
+        this.body.append(kindRow, signalRow, condRow, expireRow,
+                         messageRow, actionRow, lineRow,
                          listTitle, this.list);
 
         const foot = document.createElement('div');
@@ -384,19 +440,28 @@ export class AlertDialog {
     // ------------------------------------------------------------- 内部
     private _syncMessage(): void {
         if (!this.messageInput || this.messageInput.value) return;
-        this.messageInput.placeholder =
-            `${this.options.symbol || '商品'} ${this.cross} `
-            + `${this.priceInput?.value || ''}`;
+        this.messageInput.placeholder = this.kind === 'signal'
+            ? `${this.options.symbol || '商品'} 指标 ${this.signalKey || '?'} `
+                + `变成${this.signalOp === 'buy' ? '看多'
+                    : (this.signalOp === 'sell' ? '看空' : '中立')}`
+            : `${this.options.symbol || '商品'} ${this.cross} `
+                + `${this.priceInput?.value || ''}`;
     }
 
     private _create(): void {
         const price = Number(this.priceInput.value);
-        if (!Number.isFinite(price) || price <= 0) {
+        if (this.kind === 'price'
+                && (!Number.isFinite(price) || price <= 0)) {
             this.priceInput.focus();
             return;
         }
-        const payload = {
-            price,
+        if (this.kind === 'signal' && !this.signalKey) {
+            this.messageInput?.focus();
+            return;
+        }
+        const payload: Record<string, unknown> = {
+            kind: this.kind,
+            price: this.kind === 'signal' ? 0 : price,
             cross: this.cross,
             expire: this.expire,
             message: this.messageInput.value.trim(),
@@ -404,6 +469,11 @@ export class AlertDialog {
             qty: Math.max(1, Number(this.qtyInput.value) || 1),
             line: !!this.lineEnabled,
         };
+        if (this.kind === 'signal') {
+            payload.key = this.signalKey;
+            payload.op = this.signalOp;
+            payload.signal = {};
+        }
         emitCallback(this.callbackName, `create;;;${JSON.stringify(payload)}`);
         this.onCreateCallback?.(payload);
         this.close();

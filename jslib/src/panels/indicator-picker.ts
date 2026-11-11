@@ -94,6 +94,9 @@ const CSS = `
 .pylc-ip-filter.on{background:var(--ip-active);color:var(--ip-text);
   border-color:var(--ip-accent);font-weight:600}
 .pylc-ip-filter-count{margin-left:auto;color:var(--ip-muted);font-size:11.5px}
+.pylc-ip-filter-hint{color:var(--ip-accent);font-size:11.5px;line-height:1.5}
+.pylc-ip-filters{flex-wrap:wrap;row-gap:4px}
+.pylc-ip-filter-count{white-space:nowrap}
 `;
 
 const PALS = {
@@ -298,20 +301,7 @@ export class IndicatorPicker {
 
     /** 当前 section（+ 搜索 + 二级筛选）下的条目 ✓ */
     private _visibleRows(): PickerItem[] {
-        const needle = this.search.value.trim().toLowerCase();
-        const favorite = this.section === 'favorites';
-        const rows = this.items.filter((item) => {
-            if (needle) {
-                return item.key.toLowerCase().includes(needle)
-                    || (item.label || '').toLowerCase().includes(needle);
-            }
-            if (favorite) return !!item.favorite;
-            // 「全部指标」= 不筛（774 个全在这 ✓）
-            if (this.section === 'all') return true;
-            if (this.section === 'my_strategies') return !!item.strategy;
-            if (this.section === 'my_scripts') return item.section === 'my_scripts';
-            return item.section === this.section;
-        });
+        const rows = this._sectionRows();
         // 二级筛选：主图叠加 / 副图（未知 overlay 的一律当副图看，别藏起来 ✗）
         if (this.overlayFilter === 'main') {
             return rows.filter((item) => item.overlay === true);
@@ -330,21 +320,63 @@ export class IndicatorPicker {
         const label = document.createElement('span');
         label.textContent = '显示：';
         this.filterBar.appendChild(label);
+        // ★ 三个按钮都带**计数**（用户 2026-11-08：只看「副图」时以为指标缺了 ✓）
+        const base = this._sectionRows();
+        const counts: Record<string, number> = {
+            all: base.length,
+            main: base.filter((item) => item.overlay === true).length,
+            sub: base.filter((item) => item.overlay !== true).length,
+        };
         for (const [key, text] of [['all', '全部'],
                                    ['main', '主图叠加'],
                                    ['sub', '副图']] as const) {
             const chip = document.createElement('button');
             chip.className = 'pylc-ip-filter'
                 + (this.overlayFilter === key ? ' on' : '');
-            chip.textContent = text;
+            chip.textContent = `${text} ${counts[key]}`;
+            chip.title = `${text}：本分区 ${counts[key]} 个指标`;
             chip.addEventListener('click',
                                   () => this.setOverlayFilter(key, true));
             this.filterBar.appendChild(chip);
         }
         const count = document.createElement('span');
         count.className = 'pylc-ip-filter-count';
-        count.textContent = `${rows.length} 个`;
+        count.textContent = rows.length === base.length
+            ? `共 ${rows.length} 个`
+            : `${rows.length} / ${base.length} 个`;
         this.filterBar.appendChild(count);
+        // ★ 被筛掉多少 → 明说，并给一个「显示全部」的按钮 ✓
+        const hidden = base.length - rows.length;
+        if (this.overlayFilter !== 'all' && hidden > 0) {
+            const hint = document.createElement('span');
+            hint.className = 'pylc-ip-filter-hint';
+            hint.textContent = `（已按「${this.overlayFilter === 'main'
+                ? '主图叠加' : '副图'}」筛选，隐藏 ${hidden} 个`
+                + ` — 看不到想要的指标就点「全部 ${base.length}」）`;
+            const showAll = document.createElement('button');
+            showAll.className = 'pylc-ip-filter';
+            showAll.textContent = '显示全部';
+            showAll.addEventListener('click',
+                                     () => this.setOverlayFilter('all', true));
+            this.filterBar.append(hint, showAll);
+        }
+    }
+
+    /** 当前分组（还没过二级筛选）的条目 ✓ */
+    private _sectionRows(): PickerItem[] {
+        const needle = this.search.value.trim().toLowerCase();
+        const favorite = this.section === 'favorites';
+        return this.items.filter((item) => {
+            if (needle) {
+                return item.key.toLowerCase().includes(needle)
+                    || (item.label || '').toLowerCase().includes(needle);
+            }
+            if (favorite) return !!item.favorite;
+            if (this.section === 'all') return true;
+            if (this.section === 'my_strategies') return !!item.strategy;
+            if (this.section === 'my_scripts') return item.section === 'my_scripts';
+            return item.section === this.section;
+        });
     }
 
     private _render(): void {
@@ -360,9 +392,9 @@ export class IndicatorPicker {
                 : favorite
                 ? '（还没有收藏指标：点条目左侧的 ☆ 收藏）'
                 : (this.overlayFilter === 'main'
-                    ? '（这个分组里没有主图叠加的指标，换「全部」看看）'
+                    ? '（这个分组里没有主图叠加的指标 —— 点上面的「显示全部」）'
                     : (this.overlayFilter === 'sub'
-                        ? '（这个分组里没有副图指标，换「全部」看看）'
+                        ? '（这个分组里没有副图指标 —— 点上面的「显示全部」）'
                         : '（没有匹配的指标）'));
             this.list.appendChild(empty);
             return;

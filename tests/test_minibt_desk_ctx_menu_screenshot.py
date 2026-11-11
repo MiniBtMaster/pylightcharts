@@ -23,7 +23,10 @@ DESK_TS = ROOT / 'jslib' / 'src' / 'desk'
 
 
 def _read(path) -> str:
-    return pathlib.Path(path).read_text(encoding='utf-8')
+    target = pathlib.Path(path)
+    if not target.exists():
+        target = DESK_TS / path
+    return target.read_text(encoding='utf-8')
 
 
 # ------------------------------------------------- 图表 iframe 驱动（子页面）
@@ -243,3 +246,28 @@ def test_js_alive_helper_and_close_guard():
 
 if __name__ == '__main__':      # pragma: no cover
     raise SystemExit(pytest.main([__file__, '-q']))
+
+
+# ------------------- 右键补工具栏入口（v1.3.7-60）
+def test_chart_context_menu_has_toolbar_entries():
+    """右键要能用：更多指标 / 模板 / 策略管理 / 保存当前布局（用户 2026-11-08）"""
+    menu = _read('chart-context-menu.ts')
+    for label in ("'更多指标…'", "'模板'", "'策略管理…'", "'保存当前布局…'"):
+        assert label in menu, label
+    for hook in ('onMoreIndicators', 'onTemplates', 'onStrategyManage',
+                 'onSaveLayout'):
+        assert f'{hook}?: () => void;' in menu, hook
+    # 保存当前布局紧跟在「收藏布局」后面（已保存的布局下面 ✓）
+    favorite = menu.index("label: '收藏布局'")
+    save_layout = menu.index("label: '保存当前布局…'")
+    assert save_layout > favorite
+    # 两个图表页都要接上（实时 + 本地）
+    for name in ('chart-page.ts', 'local-chart-page.ts'):
+        page = _read(name)
+        assert 'onMoreIndicators:' in page, name
+        assert 'onTemplates: () => this.openTemplatePicker(),' in page, name
+        assert "onStrategyManage: () => this.options.onCommand?.(" in page, name
+        assert 'onSaveLayout: () => this.openSaveLayout(),' in page, name
+    # 策略管理走和编辑器「策略管理」按钮同一条命令 ✓
+    editor = _read('editor-panel.ts')
+    assert "this.options.onCommand('strategy_manage', {});" in editor

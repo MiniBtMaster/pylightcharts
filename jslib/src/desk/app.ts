@@ -13,7 +13,8 @@ import { LocalChartPage } from './local-chart-page';
 import { StrategyLabPage } from './strategy-lab-page';
 import { TvPage } from './tv-page';
 import { CommandPalette, type CommandItem } from './command-palette';
-import { DataPage, OpsPage, ResearchPage, WorkbenchPage } from './suite-pages';
+import { AlertLogPage, DataPage, OpsPage, ResearchPage, SchedulePage,
+    WorkbenchPage } from './suite-pages';
 import { deskLogo } from './logo';
 import { StrategyManager, type StrategyRow } from './layout-dialogs';
 import { ensureDeskDialogStyle, LoginDialog,
@@ -30,6 +31,10 @@ import { closeMenu, showMenu, showMenuBelow, type MenuItem } from './menu';
 import { QuotePage } from './quote-page';
 // 「设置」页（复刻 miniqt 设置界面 ✓）
 import { SettingsPage, type SettingsValues } from './settings-page';
+import { PiPage } from './pi-page';
+import { InfoPage } from './info-page';
+import { SymbolInfoPage } from './symbol-info';
+import { PiFloat } from './pi-float';
 import { AlertCenterPage, ReplayLabPage, WorkspacePage } from './workspace-pages';
 import { SymbolPreview } from './symbol-preview';
 import { detectTransport, MockTransport, type DeskBootstrap, type DeskTransport } from './transport';
@@ -45,10 +50,30 @@ interface TabItem {
     /** 原始标签（`本地图表1`；策略名接在后面 ` · test` ✓） */
     baseLabel?: string;
     kind: 'home' | 'quote' | 'chart' | 'local' | 'strategy'
-        | 'tv' | 'settings'
+        | 'tv' | 'settings' | 'ai' | 'pi'
         | 'log' | 'web' | 'workspace' | 'replay-lab' | 'alerts'
-        | 'workbench' | 'research' | 'datahub' | 'ops';
+        | 'workbench' | 'research' | 'datahub' | 'ops' | 'info'
+        | 'symbol-info';
     symbol?: string;
+}
+
+/** 页面里「编辑器面板」的最小接口（图表页 / PI 独立界面共用 ✓） */
+interface EditorPanelLike {
+    piOnPatch?: (patch: unknown) => void;
+    piPingResult?: (patch: unknown) => void;
+    setFontSize?: (px: number) => void;
+    setFormatOnSave?: (on: boolean) => void;
+    setFile?: (file: never) => void;
+    markSaved?: (path: string) => void;
+    setFormatted?: (path: string, text: string, tool: string) => void;
+    setCheck?: (path: string, result: never) => void;
+    setExplorer?: (data: never) => void;
+    setPersonalKind?: (kind: never) => void;
+    setFormattedRange?: (path: string, text: string) => void;
+    setDebugState?: (state: never) => void;
+    setTerminalOutput?: (text: string) => void;
+    setReplResult?: (output: string, error?: string) => void;
+    remove?: (path: string) => void;
 }
 
 const HOME_TAB_ID = '__home';
@@ -58,6 +83,12 @@ const SETTINGS_TAB_ID = '__settings';
 /** 「运行日志」页签（从「＋ 新建 ▾」打开 ✓） */
 const LOG_TAB_ID = '__log';
 const WORKSPACE_TAB_ID = '__workspace';
+/** PI 独立界面（对话 + 编辑代码；不需要图表 ✓） */
+const PI_TAB_ID = 'pi:app';
+/** 资讯中心（快讯 / 要闻 / 财经日历 ✓） */
+const INFO_TAB_ID = 'info:app';
+/** 标的资讯 / 资料页（多合约导航 ✓） */
+const SYMBOL_INFO_TAB_ID = 'symbol-info:app';
 const REPLAY_LAB_TAB_ID = '__replay_lab';
 const ALERT_CENTER_TAB_ID = '__alerts';
 /** 「指标和策略」页签 id ✓ */
@@ -66,6 +97,8 @@ const WORKBENCH_TAB_ID = '__workbench';
 const RESEARCH_TAB_ID = '__research';
 const DATAHUB_TAB_ID = '__datahub';
 const OPS_TAB_ID = '__ops';
+const SCHEDULE_TAB_ID = '__schedule';
+const ALERT_LOG_TAB_ID = '__alertlog';
 /** 日志环形缓冲（页面打开前的日志也保留，最多 800 条 ✓） */
 const LOG_BUFFER = 800;
 
@@ -140,6 +173,8 @@ export class DeskApp {
         | SettingsPage | LogPage>();
     /** 设置页（一个实例，关掉就销毁 ✓） */
     private settingsPage: SettingsPage | null = null;
+    /** AI 悬浮对话窗（v1.3.7-40 ✓） */
+    private piFloat: PiFloat | null = null;
     /** 后端推来的偏好设置（设置页读它 ✓） */
     private settingsValues: SettingsValues = {};
 
@@ -221,6 +256,8 @@ export class DeskApp {
     private favorites: Array<Record<string, unknown>> = [];
     private strategyFavorites: Array<Record<string, unknown>> = [];
     private theme: 'light' | 'dark';
+    /** pi（命令行）的版本（`pi --version`，来自 `pi_status` 补丁 ✓） */
+    private _piVersion = '';
     private readonly logo: HTMLDivElement;
     private quotePage: QuotePage | null = null;
     private preview: SymbolPreview | null = null;
@@ -237,8 +274,16 @@ export class DeskApp {
     private alertCenter: AlertCenterPage | null = null;
     private workbenchPage: WorkbenchPage | null = null;
     private researchPage: ResearchPage | null = null;
+    /** 资讯中心（快讯 / 要闻 / 日历 ✓） */
+    private infoPage: InfoPage | null = null;
+    /** 上次请求日历的时间（避免反复请求 ✓） */
+    private _calendarAskedAt = 0;
+    /** 标的资讯页（合约 / 个股资料 + 多标的切换 ✓） */
+    private symbolInfoPage: SymbolInfoPage | null = null;
     private datahubPage: DataPage | null = null;
     private opsPage: OpsPage | null = null;
+    private schedulePage: SchedulePage | null = null;
+    private alertLogPage: AlertLogPage | null = null;
     private palette: CommandPalette | null = null;
     /** 所有日志的环形缓冲（后开的日志页也能看到之前的 ✓） */
     private logBuffer: LogItem[] = [];
@@ -277,7 +322,8 @@ export class DeskApp {
         // ★ 只留图标（用户要求：去掉「新建」二字 ✓）
         add.innerHTML = '<span class="desk-tab-new-plus">+</span>'
             + '<span class="desk-tab-new-chev">▾</span>';
-        add.title = '新建页面（行情报价 / 本地图表）';
+        add.title = ('新建页面（行情报价 / 本地图表 / 交易工作台 / '
+                     + '策略研究 / 数据平台 / 平台运维）');
         add.addEventListener('click', () => this._showNewMenu(add));
         this.addButton = add;
         this.status = document.createElement('span');
@@ -382,7 +428,81 @@ export class DeskApp {
     }
 
     send(cmd: string, payload?: unknown): void {
+        // ★ AI 相关命令自动带上当前配置（后端没存成功也能用 ✓）
+        if (cmd.startsWith('ai_')) {
+            const base = (payload && typeof payload === 'object')
+                ? payload as Record<string, unknown> : {};
+            if (!base.config) {
+                payload = { ...base, config: this._aiOverride() };
+            }
+        }
+        // ★ 纯前端动作（后端没有这个命令）→ 就地处理，别发出去 ✓
+        // ★ 资讯 → 图表联动（纯前端动作：不发后端 ✓）
+        if (cmd === 'news_focus') {
+            const data = (payload || {}) as {
+                symbol?: string; time?: number; label?: string;
+            };
+            const symbol = String(data.symbol || '');
+            const seconds = Number(data.time) || 0;
+            const label = String(data.label || '');
+            if (!symbol) {
+                // 综合 / 宏观类资讯：找不到标的 → 明确提示（以前静默失败 ✗）
+                this.toast('warning',
+                    '这条资讯没有对应标的（综合 / 宏观类），没法打开图表');
+                return;
+            }
+            // ★ 必须**真的打开那一页**再跳时间（以前只对当前页 focusTime，
+            //   当前页不是这个标的时看起来「什么都没发生」✗ 用户 2026-11-08）
+            const id = this.openChart(symbol);
+            const page = this.pages.get(id) as unknown as {
+                focusTime?: (seconds: number, label?: string) => void;
+            } | null;
+            const jump = (tries: number) => {
+                if (page && typeof page.focusTime === 'function'
+                        && seconds > 0) {
+                    page.focusTime(seconds, label);
+                    return;
+                }
+                if (tries > 0) {
+                    window.setTimeout(() => jump(tries - 1), 260);
+                }
+            };
+            // 图表 K 线还没到 → 等一拍再跳（最多约 1.5 秒 ✓）
+            jump(6);
+            return;
+        }
+        if (cmd === 'open_symbol_info') {
+            const data = (payload || {}) as { symbols?: string[];
+                                             active?: string };
+            this.openSymbolInfo(data.symbols || [], data.active || '');
+            return;
+        }
         this.transport.send({ cmd, payload });
+    }
+
+    /**
+     * 延后发命令（开图时不和 K 线抢主线程 ✓）
+     *
+     * `[cmd, payload, delayMs]` —— 每条一个 `setTimeout`，默认错开 120ms；
+     * 页面已经关掉就跳过（避免给已销毁的图表发补丁 ✗）。
+     */
+    private _deferCommands(rows: Array<[string, unknown, number]>): void {
+        rows.forEach(([cmd, payload, delay], index) => {
+            window.setTimeout(() => {
+                this.send(cmd, payload);
+            }, Math.max(0, Number(delay) || index * 120));
+        });
+    }
+
+    /** 命令面板用：从当前图表取标的清单 ✓ */
+    private _openSymbolInfoFromChart(): void {
+        const page = this._activeChartPage() || this._activeLocalPage();
+        const symbols = ((page as unknown as { cellSymbols?: string[] })
+            ?.cellSymbols || []).filter(Boolean);
+        const active = (page as unknown as {
+            symbolForCell?: (index: number) => string;
+        })?.symbolForCell?.(0) || '';
+        this.openSymbolInfo(symbols, active);
     }
 
     // ------------------------------------------------------------- home / lazy quote
@@ -411,6 +531,8 @@ export class DeskApp {
             onOpenWorkspace: () => this.openWorkspace(),
             onOpenReplayLab: () => this.openReplayLab(),
             onOpenAlerts: () => this.openAlertCenter(),
+            // ★ PI 独立界面（对话 + 编辑代码；首页「预警中心」下面 ✓）
+            onOpenPi: () => this.openPiWorkspace(),
             onOpenTv: () => this.openTvPage(),
         });
         page.hide();
@@ -488,11 +610,28 @@ export class DeskApp {
                 run: () => this.openTvPage(),
             },
             {
+                // ★ PI 助手：**独立界面**（对话 + 编辑代码，不用先开图表 ✓）
+                label: 'PI 助手（对话 / 编辑代码）',
+                separator: true,
+                run: () => this.openPiWorkspace(),
+            },
+            {
+                // ★ AI 悬浮窗：随时在右下角问一句（`F1` ✓）
+                label: 'AI 悬浮窗（对话 / 快捷键 F1）',
+                run: () => this.openPiFloat(),
+            },
+            {
+                // ★ 资讯中心：快讯 / 要闻 / 财经日历（AkShare 可选依赖 ✓）
+                label: '资讯中心（快讯 / 要闻 / 财经日历）',
+                run: () => this.openInfo(),
+            },
+            {
                 // ★ 独立日志页：不打开图表也能看日志（用户要求 ✓）
                 label: '运行日志',
                 run: () => this.openLog(),
             },
-            /* 扩展功能入口暂时关闭：需要时再打开 ✓
+            /* 四个扩展入口暂时关闭（用户 2026-11-11：使用频率低 + 功能未完善 ✓）
+               定时任务页仍然开放（它是独立页，见下一条）✓
             {
                 label: '交易工作台（订单票 / 风控 / 审计）',
                 separator: true,
@@ -507,10 +646,19 @@ export class DeskApp {
                 run: () => this.openDataHub(),
             },
             {
-                label: '平台 / 运维（Token / 任务 / 告警）',
+                label: '平台 / 运维（Token / 告警 / 版本）',
                 run: () => this.openOps(),
             },
             */
+            {
+                label: '定时任务（工具 / AI / 内置）',
+                separator: true,
+                run: () => this.openSchedule(),
+            },
+            {
+                label: '告警中心（历史告警 / 搜索）',
+                run: () => this.openAlertLog(),
+            },
             {
                 label: futuresOn ? '切换 / 重新登录期货账户…'
                     : '登录期货账户（天勤）…',
@@ -621,6 +769,17 @@ export class DeskApp {
             '.desk-strategy-lab',
             '.desk-quote-head',
             '.desk-tv',            // 指标和策略页（卡片自己有右键菜单 ✓）
+            // ★ 「指标、衡量标准和策略」选择器（pylightcharts IndicatorPicker）
+            //   —— 用户 2026-11-08：这里的**原始右键菜单**要禁用 ✓
+            //   （搜索框/输入框走下面的 allow，粘贴仍然可用 ✓）
+            '.pylc-ip-mask',
+            '.pylc-ip',
+            // 其它 pylightcharts 浮层（模板选择器 / 提醒对话框…）同样禁用
+            '.pylc-tp-mask',        // 模板选择器
+            '.pylc-al-mask',        // 预警对话框
+            '.pylc-ss-mask',        // 合约搜索
+            '.pylc-menu',
+            '.desk-menu',          // 工具栏下拉菜单（指标 / 模板 / 🗑 …）
         ].join(', ');
         const allow = [
             'input', 'textarea', 'select', '[contenteditable="true"]',
@@ -942,6 +1101,23 @@ export class DeskApp {
         if (label) label.textContent = next;
     }
 
+    /** 图表页变成前台时补一次「标的专属事件」（页面早开、数据后到 ✓） */
+    private _ensureCalendarForPage(id: string): void {
+        const page = this.pages.get(id);
+        if (!(page instanceof ChartPage) && !(page instanceof LocalChartPage)) {
+            return;
+        }
+        const target = page as unknown as {
+            calendarMarkerCount?: number;
+            refreshSymbolEvents?: () => void;
+        };
+        if (Number(target.calendarMarkerCount || 0) > 0) return;
+        const now = Date.now();
+        if (now - this._calendarAskedAt < 60000) return;
+        this._calendarAskedAt = now;
+        target.refreshSymbolEvents?.();
+    }
+
     private _addTab(tab: TabItem): void {
         tab.baseLabel = tab.baseLabel || tab.label;
         this.tabs.set(tab.id, tab);
@@ -1125,6 +1301,104 @@ export class DeskApp {
      *
      * 入口：首页左侧「工作区」、顶栏「＋」菜单、命令面板 ✓
      */
+    /**
+     * 打开 PI 助手：**没有独立页面** —— 打开当前图表页的编辑器，
+     * 并切到左栏「PI 会话」（用户 2026-11-08 要求 ✓）
+     */
+    /** 所有带编辑器面板的页面（图表 / 本地图表 / **PI 独立界面** ✓） */
+    private _editorPanels(): EditorPanelLike[] {
+        const rows: EditorPanelLike[] = [];
+        for (const page of this.pages.values()) {
+            const panel = (page as { editorPanel?: unknown }).editorPanel;
+            if (panel) rows.push(panel as EditorPanelLike);
+        }
+        return rows;
+    }
+
+    /**
+     * AI 悬浮窗：**先出现 PI 小球**（双击小球才开对话窗口 ✓ 用户 2026-11-08）
+     *
+     * 小球可以拖到界面任意位置（不再吸附边界）；关掉对话窗口又会变回小球。
+     */
+    openPiFloat(): PiFloat {
+        if (!this.piFloat) {
+            this.piFloat = new PiFloat({
+                theme: this.theme,
+                // ★ 用户自选的小球背景色（设置 → 个性化 → PI 操控 desk ✓）
+                ballColor: String(this.settingsValues.pi_float_color || ''),
+                onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level, text),
+                onOpenSession: (id) => {
+                    const page = this.openPiWorkspace();
+                    page.editorPanel.openPiSession(String(id));
+                },
+                onModels: () => {
+                    const page = this.openPiWorkspace();
+                    (page.editorPanel as unknown as {
+                        _openPiModels?: () => void;
+                    })._openPiModels?.();
+                },
+                onClose: () => { /* 保持实例，下次直接复用 ✓ */ },
+                // ★ 右键「关闭悬浮窗」= 彻底退出：销毁实例 + 关掉独立小窗 ✓
+                onQuit: () => {
+                    this.piFloat?.destroy();
+                    this.piFloat = null;
+                    this.send('pi_float_close', {});
+                    this.toast('info', '已关闭 AI 悬浮窗（菜单 / F1 可再打开）');
+                },
+            });
+            document.body.appendChild(this.piFloat.element);
+            document.body.appendChild(this.piFloat.icon);
+        }
+        this.piFloat.setTheme(this.theme);
+        // ★ 快捷入口 = 出现小球（不是直接弹对话窗口 ✓）
+        if (!this.piFloat.visible) this.piFloat.show();
+        else this.piFloat.showBall();
+        return this.piFloat;
+    }
+
+    /** PI 独立界面：编辑器 + 对话（不需要本地图表 / 实时图表 ✓） */
+    openPiWorkspace(): PiPage {
+        if (!this.tabs.has(PI_TAB_ID)) {
+            const page = new PiPage({
+                theme: this.theme,
+                version: this.version,
+                // ⚠ 不能覆盖 `payload.id`：PI 的命令里 `id` = **会话 id**
+                //   （以前被改成 `pi:app` → 删除 / 历史 / 发送全打错会话 ✗）
+                onCommand: (cmd: string, payload?: unknown) =>
+                    this.send(cmd, payload),
+                onToast: (level: string, text: string) => this.toast(level,
+                                                                    text),
+                lsp: () => this.lspInfo || undefined,
+                formatOnSave: this.settingsValues
+                    .editor_format_on_save === true,
+                // ★ pi（命令行）自己的版本，不是 minibt 版本 ✓
+                piVersion: String(this._piVersion || ''),
+                rootHint: String(
+                    (this.settingsValues as { pi_root?: string })
+                        .pi_root || ''),
+            });
+            this.pages.set(PI_TAB_ID, page as never);
+            this.stack.appendChild(page.element);
+            this._addTab({ id: PI_TAB_ID, label: 'PI 助手', kind: 'pi' });
+        }
+        this.activate(PI_TAB_ID);
+        const page = this.pages.get(PI_TAB_ID) as unknown as PiPage;
+        page?.show();
+        return page;
+    }
+
+    openChartEditorForPi(): void {
+        const page = this._activeChartPage() || this._activeLocalPage();
+        if (!page) {
+            this.toast('warning', '先打开一个实时图表 / 本地图表，再用 PI 助手');
+            return;
+        }
+        page.openEditor();
+        page.editorPanel?.openPiSidebar();
+    }
+
+
     openTvPage(): TvPage {
         if (!this.tabs.has(TV_TAB_ID)) {
             const page = new TvPage({
@@ -1451,6 +1725,50 @@ export class DeskApp {
         return page;
     }
 
+    /** 资讯中心：快讯 / 要闻 / 财经日历（AkShare，可选依赖 ✓） */
+    openInfo(): InfoPage {
+        const page = this._suitePage(INFO_TAB_ID, '资讯中心', 'info',
+            () => new InfoPage({
+                theme: this.theme,
+                onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level as never, text),
+            }),
+            'info_news');
+        this.infoPage = page;
+        return page;
+    }
+
+    /**
+     * 标的资讯页：`symbols` 来自图表**每格**的合约（多布局可切换 ✓）
+     *
+     * 入口：图表右键「资讯 / 财务…」、命令面板「标的资讯」。
+     */
+    openSymbolInfo(symbols: string[], active = ''): SymbolInfoPage {
+        // ★ 页签被关掉后 `pages` 里没有了，但字段还挂着旧对象 →
+        //   以前再点「资讯 / 财务…」什么都不出现（用户 2026-11-08 ✗）
+        if (this.symbolInfoPage && !this.pages.has(SYMBOL_INFO_TAB_ID)) {
+            this.symbolInfoPage = null;
+        }
+        if (!this.symbolInfoPage) {
+            const page = new SymbolInfoPage({
+                theme: this.theme,
+                symbols,
+                active,
+                onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level as never, text),
+            });
+            this.symbolInfoPage = page;
+            this.pages.set(SYMBOL_INFO_TAB_ID, page as never);
+            this.stack.appendChild(page.element);
+            this._addTab({ id: SYMBOL_INFO_TAB_ID, label: '标的资讯',
+                           kind: 'symbol-info' });
+        }
+        this.symbolInfoPage.setSymbols(symbols || [], active);
+        this.activate(SYMBOL_INFO_TAB_ID);
+        this.symbolInfoPage.show();
+        return this.symbolInfoPage;
+    }
+
     /** 本地数据平台：行情库 / 质检 / 换月 / SQL / Tick ✓ */
     openDataHub(): DataPage {
         const page = this._suitePage(DATAHUB_TAB_ID, '数据平台',
@@ -1471,9 +1789,43 @@ export class DeskApp {
             () => new OpsPage({
                 theme: this.theme,
                 onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level, text),
             }),
             'ops');
         this.opsPage = page;
+        return page;
+    }
+
+    /** 定时任务：独立页（v1.3.7-88；原来在运维页里）✓ */
+    openSchedule(): SchedulePage {
+        const page = this._suitePage(SCHEDULE_TAB_ID, '定时任务',
+            'ops',
+            () => new SchedulePage({
+                theme: this.theme,
+                onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level, text),
+            }),
+            'ops_task_history');
+        this.schedulePage = page;
+        return page;
+    }
+
+    /** 告警中心：所有命中过的告警（时间轴 + 搜索 ✓ v1.3.7-97） */
+    openAlertLog(): AlertLogPage {
+        const page = this._suitePage(ALERT_LOG_TAB_ID, '告警中心',
+            'ops',
+            () => new AlertLogPage({
+                theme: this.theme,
+                onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level, text),
+                // 一键复现：打开对应合约的实时图表 ✓
+                onOpen: (symbol) => {
+                    if (!symbol) return;
+                    this.openChart(symbol);
+                },
+            }),
+            'ops_alert_log');
+        this.alertLogPage = page;
         return page;
     }
 
@@ -1496,22 +1848,34 @@ export class DeskApp {
             { label: '指标和策略', hint: 'TradingView 指标库',
               keywords: 'tradingview tv indicators strategies',
               run: () => this.openTvPage() },
+            { label: '标的资讯', hint: '当前合约 / 个股资料（多布局可切换）',
+              keywords: 'symbol info contract inventory basis 合约 资料',
+              run: () => this._openSymbolInfoFromChart() },
+            { label: '资讯中心', hint: '快讯 / 要闻 / 财经日历',
+              keywords: 'news info calendar macro 资讯 快讯 日历',
+              run: () => this.openInfo() },
             { label: '预警中心', hint: '全局价格预警',
               run: () => this.openAlertCenter() },
-            /* 扩展功能入口暂时关闭：需要时再打开 ✓
+            /* 四个扩展页暂时不进命令面板（v1.3.7-94 再次关闭，同 ＋新建 ▾）✓
             { label: '交易工作台', hint: '订单票 / 风控 / 审计',
-              keywords: 'order trade risk audit',
+              keywords: 'order trade risk audit 工作台 订单 风控 审计',
               run: () => this.openWorkbench() },
             { label: '策略研究', hint: 'walk-forward / 实验库',
-              keywords: 'research walk forward pareto',
+              keywords: 'research walk forward pareto 研究 实验',
               run: () => this.openResearch() },
             { label: '数据平台', hint: '质检 / 换月 / SQL',
-              keywords: 'data parquet duckdb quality',
+              keywords: 'data parquet duckdb quality 数据 质检 换月',
               run: () => this.openDataHub() },
-            { label: '平台 / 运维', hint: 'Token / 定时任务 / 告警',
-              keywords: 'ops token cron notify version',
+            { label: '平台 / 运维', hint: 'Token / 告警 / 版本',
+              keywords: 'ops token notify version 运维 令牌 告警',
               run: () => this.openOps() },
             */
+            { label: '定时任务', hint: '每 N 秒 / 每天 HH:MM / 前置任务',
+              keywords: 'schedule cron timer task 定时 任务 调度 定时器',
+              run: () => this.openSchedule() },
+            { label: '告警中心', hint: '历史告警 / 时间轴 / 搜索',
+              keywords: 'alert log history 告警 记录 历史 通知',
+              run: () => this.openAlertLog() },
             { label: '运行日志', hint: '后端日志',
               run: () => this.openLog() },
             { label: '设置', hint: '本地文件 / 图表 / 个性化',
@@ -1520,12 +1884,13 @@ export class DeskApp {
               run: () => this.openLogin('futures') },
             { label: '股票连接', hint: '富途 OpenD',
               run: () => this.openLogin('stocks') },
-            /* 扩展功能入口暂时关闭：需要时再打开 ✓
+            /* 工作台入口关了 → 这两条也先关（v1.3.7-94）✓
             { label: '工作台：对账', hint: '本地流水 vs 券商',
-              keywords: 'reconcile',
+              keywords: 'reconcile 对账',
               run: () => { this.openWorkbench();
                   this.send('workbench_reconcile', {}); } },
             { label: '工作台：导出审计 CSV', hint: '交易审计日志',
+              keywords: 'audit csv export 审计 导出',
               run: () => { this.openWorkbench();
                   this.send('workbench_export', { table: 'audit' }); } },
             */
@@ -1556,6 +1921,7 @@ export class DeskApp {
                 version: this.version,
                 onSetting: (key, value) => this._onSetting(key, value),
                 onCommand: (cmd, payload) => this.send(cmd, payload),
+                onToast: (level, text) => this.toast(level, text),
             });
             this.settingsPage = page;
             this.pages.set(id, page);
@@ -1573,6 +1939,36 @@ export class DeskApp {
     }
 
     /** 设置页改了某一项 → 立即生效 + 交给后端落盘 ✓ */
+    /** AI 配置：设置里的值 + 浏览器本地缓存（后端没存成功也能用 ✓） */
+    private _aiOverride(): Record<string, unknown> {
+        const read = (key: string): string => {
+            const fromStore = this.settingsValues
+                ? String((this.settingsValues as Record<string, unknown>)[key]
+                    ?? '') : '';
+            if (fromStore) return fromStore;
+            try {
+                return window.localStorage.getItem(`desk.ai.${key}`) || '';
+            } catch {
+                return '';
+            }
+        };
+        const turns = Number(read('ai_max_turns') || 0) || 6;
+        const config: Record<string, unknown> = {
+            base: read('ai_base_url'),
+            model: read('ai_model'),
+            key: read('ai_api_key'),
+            priceIn: read('ai_price_in'),
+            priceOut: read('ai_price_out'),
+            window: read('ai_context_window'),
+            turns,
+        };
+        if ('ai_tools' in (this.settingsValues || {})) {
+            config.tools = (this.settingsValues as Record<string, unknown>)
+                .ai_tools !== false;
+        }
+        return config;
+    }
+
     private _onSetting(key: string, value: unknown): void {
         if (key === 'app_theme') {
             this.applyTheme(value === 'light' ? 'light' : 'dark');
@@ -1590,6 +1986,18 @@ export class DeskApp {
         }
         this.settingsValues = { ...this.settingsValues, [key]: value };
         this.send('set_setting', { key, value });
+        // ★ PI 悬浮球颜色：立即生效（不用重开悬浮窗 ✓）
+        if (key === 'pi_float_color') {
+            this.piFloat?.setBallColor(String(value || ''));
+        }
+        // ★ 「全部事件都画」开关：让所有图表页重新拉一次事件 ✓
+        if (key === 'chart_events_all') {
+            for (const page of this.pages.values()) {
+                (page as unknown as {
+                    refreshSymbolEvents?: () => void;
+                }).refreshSymbolEvents?.();
+            }
+        }
         // 立即在前端生效（不用等后端回推 ✓）
         const charts = [...this.pages.values()].filter(
             (page): page is ChartPage | LocalChartPage =>
@@ -1632,6 +2040,22 @@ export class DeskApp {
         }
         if ('watch_default_group' in values) {
             this.home?.setDefaultGroup(String(values.watch_default_group || ''));
+        }
+        // ★ AI 助手：配置一变就刷新页头的模型 / Key 提示 ✓
+        if (['ai_model', 'ai_base_url', 'ai_api_key', 'ai_tools']
+            .some((key) => key in values)) {
+            this.send('ai_status', {});
+        }
+        // ★ 编辑器字号 = 设置里的基准 × 界面缩放（v1.3.7 ✓）
+        if ('editor_font_size' in values || 'ui_zoom' in values) {
+            const base = Number(values.editor_font_size) || 12.5;
+            const zoom = values.ui_zoom === undefined
+                || values.ui_zoom === null
+                ? 1 : (Number(values.ui_zoom) || 1);
+            const px = Math.max(9, Math.min(28, base * (zoom || 1)));
+            for (const panel of this._editorPanels()) {
+                panel.setFontSize?.(px);
+            }
         }
         const chartKeys = ['chart_font_size', 'chart_color_up',
             'chart_color_down', 'chart_color_crosshair',
@@ -1790,13 +2214,18 @@ export class DeskApp {
         page.applyTheme(this.theme);
         // ★ 跨周期联动：任一 tab 拖动时间轴 → 其它 tab 按**时间**对齐 ✓
         page.onRangeChange = (from, to) => this._broadcastRange(id, from, to);
-        this.send('trading_state', { symbol });
-        // ★ 这一页的账户目录（下拉框选项 / 当前 key 各自独立 ✓）
-        this.send('account_kind', { page: `chart:${symbol}` });
-        this.send('alerts', {});
-        this.send('favorites', {});
-        this.send('templates', {});
-        this.send('layouts', { local: false });
+        // ★ 用户 2026-11-08：开图**先要 K 线**，其余（账户 / 预警 / 收藏 /
+        //   模板 / 布局 / 事件圆点）全部**延后**发 —— 以前一上来就排 6 条命令，
+        //   后端在主线程逐条处理（favorites 实测 4~7s）→ 图表一直「加载数据」✗
+        this._deferCommands([
+            ['account_kind', { page: `chart:${symbol}` }, 0],
+            ['trading_state', { symbol }, 0],
+            ['alerts', {}, 260],
+            ['favorites', {}, 400],
+            ['templates', {}, 520],
+            ['layouts', { local: false }, 640],
+            ['info_symbol_events', { symbol, page: `chart:${symbol}` }, 800],
+        ]);
         return id;
     }
 
@@ -1854,6 +2283,7 @@ export class DeskApp {
         page.setLayoutSpec(source.layoutSpec, false);
         names.forEach((name, cell) => {
             if (name) this.send('local_load', { name, cell, page: newId });
+            this.send('info_symbol_events', { symbol: name, page: newId });
         });
         this.toast('success', `已复制为 ${this.tabs.get(newId)?.label || ''}`);
         return newId;
@@ -2029,14 +2459,16 @@ export class DeskApp {
         this.activate(id);
         if (name) this.home?.recordRecent(name, name, 'local');
         page.applyTheme(this.theme);
+        // ★ 先要数据（K 线），其余延后（和实时图表一致 ✓ v1.3.7-67）
         this.send('local_list', {});
-        this.send('layouts', { local: true });
         this.send('local_account', { symbol: name });
-        this.send('favorites', {});
-        this.send('templates', {});      // 右键「我的模板」要这份列表 ✓
-        // ★ 带 `page`：多开本地图表时后端按页签回补丁（这一页还没加载过该
-        //   CSV，按名字是找不到的 ✗）
         if (name) this.send('local_load', { name, cell: 0, page: id });
+        this._deferCommands([
+            ['layouts', { local: true }, 0],
+            ['favorites', {}, 200],
+            ['templates', {}, 320],
+            ['info_symbol_events', { symbol: name, page: id }, 480],
+        ]);
         return id;
     }
 
@@ -2099,47 +2531,67 @@ export class DeskApp {
         if (id === HOME_TAB_ID) return;       // 首页固定，不可关闭 ✓
         const sourceTab = this.strategySources.get(id) || '';
         const page = this.pages.get(id);
-        // ★ 关页 → 后端退订这一页所有格的买卖盘（省 5 档订阅 ✓）
-        if (page instanceof ChartPage || page instanceof LocalChartPage) {
-            this.send('book_watch', { page: id, clear: true });
-        }
-        if (page instanceof ChartPage) {
-            page.destroy();
-            this.send('close_chart', { symbol: page.symbol });
-        } else if (page instanceof LocalChartPage) {
-            page.destroy();
-        } else if (page instanceof StrategyLabPage) {
-            this.send('strategy_cancel', { id });
-            page.destroy();
-            this.strategyPages.delete(id);
-            this.strategySources.delete(id);
-            // ★ 关掉回测 / 优化页 → 编辑器里的「策略回测 / 参数优化」要能再点 ✓
-            this._refreshEditors();
-        } else if (page instanceof SettingsPage) {
-            this.settingsPage = null;
-            this.settingsButton?.classList.remove('on');
-        } else if (id === LOG_TAB_ID) {
-            this.logPage = null;          // 关掉后重新打开会带最新缓冲 ✓
-        } else if (id === WORKSPACE_TAB_ID) {
-            this.workspacePage = null;
-        } else if (id === REPLAY_LAB_TAB_ID) {
-            this.replayLabPage = null;
-        } else if (id === ALERT_CENTER_TAB_ID) {
-            this.alertCenter = null;
-        } else if (id === WORKBENCH_TAB_ID) {
-            this.workbenchPage = null;
-        } else if (id === RESEARCH_TAB_ID) {
-            this.researchPage = null;
-        } else if (id === DATAHUB_TAB_ID) {
-            this.datahubPage = null;
-        } else if (id === OPS_TAB_ID) {
-            this.opsPage = null;
-        } else if (id === QUOTE_TAB_ID) {
-            this.quoteRequested = false;
-            this.quotePage = null;
-            this.preview?.hide();
-            this.preview?.element.remove();
-            this.preview = null;
+        // ★ 任何一页的销毁逻辑抛错都**不能**阻止删页签 / 摘 DOM
+        //   （用户 2026-11-08：新建的左右布局图表页关不掉 ✗）
+        try {
+            // ★ 关页 → 后端退订这一页所有格的买卖盘（省 5 档订阅 ✓）
+            if (page instanceof ChartPage || page instanceof LocalChartPage) {
+                this.send('book_watch', { page: id, clear: true });
+            }
+            if (page instanceof ChartPage) {
+                // ★ 关页必须**无论 destroy 成功与否**都摘掉 DOM（用户 2026-11-08：
+                //   新建的图表页关不掉，留一个空白页挡住其它页 ✗）
+                try {
+                    page.destroy();
+                } catch (error) {
+                    console.warn('[desk] 图表页销毁失败', error);
+                }
+                this.send('close_chart', { symbol: page.symbol });
+            } else if (page instanceof LocalChartPage) {
+                try {
+                    page.destroy();
+                } catch (error) {
+                    console.warn('[desk] 本地图表销毁失败', error);
+                }
+            } else if (page instanceof StrategyLabPage) {
+                this.send('strategy_cancel', { id });
+                page.destroy();
+                this.strategyPages.delete(id);
+                this.strategySources.delete(id);
+                // ★ 关掉回测 / 优化页 → 编辑器里的「策略回测 / 参数优化」要能再点 ✓
+                this._refreshEditors();
+            } else if (page instanceof SettingsPage) {
+                this.settingsPage = null;
+                this.settingsButton?.classList.remove('on');
+            } else if (id === LOG_TAB_ID) {
+                this.logPage = null;          // 关掉后重新打开会带最新缓冲 ✓
+            } else if (id === WORKSPACE_TAB_ID) {
+                this.workspacePage = null;
+            } else if (id === REPLAY_LAB_TAB_ID) {
+                this.replayLabPage = null;
+            } else if (id === ALERT_CENTER_TAB_ID) {
+                this.alertCenter = null;
+            } else if (id === WORKBENCH_TAB_ID) {
+                this.workbenchPage = null;
+            } else if (id === RESEARCH_TAB_ID) {
+                this.researchPage = null;
+            } else if (id === DATAHUB_TAB_ID) {
+                this.datahubPage = null;
+            } else if (id === OPS_TAB_ID) {
+                this.opsPage = null;
+            } else if (id === INFO_TAB_ID) {
+                this.infoPage = null;
+            } else if (id === SYMBOL_INFO_TAB_ID) {
+                this.symbolInfoPage = null;
+            } else if (id === QUOTE_TAB_ID) {
+                this.quoteRequested = false;
+                this.quotePage = null;
+                this.preview?.hide();
+                this.preview?.element.remove();
+                this.preview = null;
+            }
+        } catch (error) {
+            console.warn('[desk] 关页出错（已强制清理）', id, error);
         }
         for (const [url, tabId] of [...this.webTabs]) {
             if (tabId === id) this.webTabs.delete(url);
@@ -2195,13 +2647,21 @@ export class DeskApp {
             button.classList.toggle('on', key === id);
         }
         this._scrollTabIntoView(this.buttons.get(id));
+        // 图表页：如果还没画过日历圆点 → 补一次（页面早开、日历后到 ✓）
+        this._ensureCalendarForPage(id);
         for (const [key, page] of this.pages) {
             if (page instanceof SettingsPage) {
                 page.element.style.display = key === id ? 'flex' : 'none';
                 continue;
             }
-            if (key === id) page.show();
-            else page.hide();
+            try {
+                if (key === id) page.show();
+                else page.hide();
+            } catch (error) {
+                // 某一页 show/hide 抛错不能连累其它页（否则会“压住”界面 ✗）
+                console.warn('[desk] 页面显隐失败', key, error);
+                if (key !== id) page.element.style.display = 'none';
+            }
         }
         // ★ 上报"哪些页面可见"：首页 / 报价页没打开时后端**不拉报价**
         //   （实盘 query_quotes 可能卡几秒，后台空转会把界面拖住 ✓）
@@ -2660,7 +3120,8 @@ export class DeskApp {
                     const bars = patch.bars || [];
                     if (patch.cell) {
                         page.setCellBars(Number(patch.cell), bars,
-                                         patch.replace !== false);
+                                         patch.replace !== false,
+                                         Number(patch.cycle) || undefined);
                     } else {
                         page.setBars(bars, patch.replace !== false);
                     }
@@ -2688,12 +3149,297 @@ export class DeskApp {
                         patch.mode === 'optimize' ? 'optimize' : 'backtest');
                 } else if (action === 'open_home') {
                     this.openHome();
+                } else if (action === 'close_tabs') {
+                    // ★ PI 工具：关闭页面 / 编辑器页签 / PI 会话 ✓
+                    const kind = String(
+                        (patch as { kind?: string }).kind || 'page');
+                    const ids = (patch as { ids?: string[] }).ids || [];
+                    const all = (patch as { all?: boolean }).all === true;
+                    if (kind === 'page') {
+                        const targets = all ? [...this.pages.keys()]
+                            : ids;
+                        for (const item of targets) this.closeTab(item);
+                    } else if (kind === 'editor' || kind === 'pi') {
+                        type EditorHost = {
+                            editorPanel?: {
+                                closeTabs?: (kind: string, ids: string[],
+                                             all: boolean) => void;
+                            };
+                        };
+                        const panel = (this.pages.get(this.activeId)
+                            || null) as EditorHost | null;
+                        const editor = panel?.editorPanel
+                            || (this.pages.get(HOME_TAB_ID) as
+                                EditorHost | null)?.editorPanel;
+                        editor?.closeTabs?.(kind, ids, all);
+                    }
+                } else if (action === 'open_ui') {
+                    // ★ PI 工具：打开日志 / 设置 / 命令面板 / 登录 … ✓
+                    const target = String(
+                        (patch as { target?: string }).target || 'settings');
+                    if (target === 'logs') this.openLog();
+                    else if (target === 'palette') this.openPalette();
+                    else if (target === 'home') this.openHome();
+                    else if (target === 'quote') this.openQuote();
+                    else if (target === 'workspace') this.openWorkspace?.();
+                    else if (target === 'research') this.openResearch();
+                    // ★ v1.3.7-83：四个扩展页都能从 PI 打开 ✓
+                    else if (target === 'workbench') this.openWorkbench();
+                    else if (target === 'datahub') this.openDataHub();
+                    else if (target === 'ops') this.openOps();
+                    else if (target === 'schedule') this.openSchedule();
+                    else if (target === 'info') this.openInfo();
+                    else if (target === 'login') {
+                        const login = String(
+                            (patch as { login?: string }).login
+                            || 'futures');
+                        this.openLogin(login as never);
+                    } else {
+                        const section = String(
+                            (patch as { section?: string }).section || '');
+                        this.openSettings(section || undefined);
+                    }
+                } else if (action === 'replay') {
+                    // ★ PI 工具（desk_replay{local:true}）：本地图表进入回放 ✓
+                    const pageId = String(
+                        (patch as { page?: string }).page || '');
+                    const local = pageId && this.pages.has(pageId)
+                        ? this.pages.get(pageId)
+                        : this._activeLocalPage();
+                    (local as { toggleReplay?: () => void } | null)
+                        ?.toggleReplay?.();
+                } else if (action === 'book') {
+                    // ★ PI 工具（desk_book{action:"open"}）：显示右侧二级报价面板
+                    //   （以前只有后端订阅盘口，面板一直是隐藏的 → 看不到 ✗）
+                    const pageId = String(
+                        (patch as { page?: string }).page || '');
+                    const target = pageId && this.pages.has(pageId)
+                        ? this.pages.get(pageId)
+                        : (this.pages.get(this.activeId) || null);
+                    const on = (patch as { on?: boolean }).on;
+                    const toggle = (target as {
+                        toggleBook?: (visible?: boolean) => boolean;
+                    } | null)?.toggleBook;
+                    if (typeof toggle === 'function') {
+                        const shown = toggle.call(target, on);
+                        this.send('book_shown', {
+                            page: pageId || this.activeId, on: shown,
+                        });
+                    } else {
+                        this.send('book_shown', {
+                            page: pageId || this.activeId, on: false,
+                            error: '当前页没有二级报价面板（不是图表页）',
+                        });
+                    }
+                } else if (action === 'draw_toolbox') {
+                    // ★ PI 工具（desk_drawings{action:"toolbox"}）：等价右键「画线」
+                    const pageId = String(
+                        (patch as { page?: string }).page || '');
+                    const target = (pageId && this.pages.has(pageId)
+                        ? this.pages.get(pageId)
+                        : (this._activeChartPage()
+                            || this._activeLocalPage()));
+                    type ToolBoxHost = {
+                        setToolBox?: (on: boolean) => boolean;
+                        toggleToolBox?: () => boolean;
+                    };
+                    const host = target as unknown as ToolBoxHost | null;
+                    const want = (patch as { on?: boolean }).on;
+                    try {
+                        let shown = false;
+                        if (typeof host?.setToolBox === 'function'
+                            && want !== undefined) {
+                            shown = !!host.setToolBox(!!want);
+                        } else if (typeof host?.toggleToolBox === 'function') {
+                            shown = !!host.toggleToolBox();
+                        }
+                        this.send('draw_toolbox', {
+                            ok: typeof host?.toggleToolBox === 'function',
+                            page: pageId || this.activeId, on: shown,
+                            error: typeof host?.toggleToolBox === 'function'
+                                ? '' : '当前页没有图表（先切到实时 / 本地图表）',
+                        });
+                    } catch (error) {
+                        this.send('draw_toolbox', {
+                            ok: false, page: pageId || this.activeId,
+                            error: `前端切换画线工具箱失败：${String(error)}`,
+                        });
+                    }
+                } else if (action === 'bars') {
+                    // ★ PI 工具（desk_bars）：等价右键「全部K线 / 最新K线 N 根」
+                    //   模型不用去改设置里的加载长度 ✓（用户 2026-11-08）
+                    const pageId = String(
+                        (patch as { page?: string }).page || '');
+                    const wantLocal = (patch as { local?: boolean }).local
+                        === true;
+                    const target = (pageId && this.pages.has(pageId)
+                        ? this.pages.get(pageId)
+                        : (wantLocal ? this._activeLocalPage()
+                            : (this._activeChartPage()
+                                || this._activeLocalPage())));
+                    type BarsHost = {
+                        fitAllBars?: (cell?: number) => void;
+                        showLastBars?: (count?: number,
+                                        cell?: number) => void;
+                        barsCount?: (cell?: number) => number;
+                    };
+                    const host = target as unknown as BarsHost | null;
+                    const mode = String(
+                        (patch as { mode?: string }).mode || 'last');
+                    const count = Number(
+                        (patch as { count?: number }).count || 300);
+                    const rawCell = (patch as { cell?: number }).cell;
+                    const cell = rawCell === undefined || rawCell === null
+                        ? -1 : Number(rawCell);
+                    try {
+                        if (typeof host?.barsCount !== 'function') {
+                            this.send('bars', {
+                                ok: false, page: pageId || this.activeId,
+                                error: '当前页没有图表（先切到实时 / 本地图表）',
+                            });
+                        } else {
+                            if (mode === 'all') host.fitAllBars?.(cell);
+                            else host.showLastBars?.(count, cell);
+                            this.send('bars', {
+                                ok: true,
+                                page: pageId || this.activeId,
+                                mode, count, cell,
+                                bars: host.barsCount?.(cell) ?? 0,
+                            });
+                        }
+                    } catch (error) {
+                        this.send('bars', {
+                            ok: false, page: pageId || this.activeId,
+                            error: `前端缩放失败：${String(error)}`,
+                        });
+                    }
+                } else if (action === 'screenshot') {
+                    // ★ PI 工具（desk_screenshot）：让图表页截图并**把 dataURL 发回后端**
+                    //   以前只调 `screenshot()`（那是「下载 PNG」）→ 后端永远等不到
+                    //   → `截图超时（前端没响应）` ✗（用户 2026-11-08 实测）
+                    const pageId = String(
+                        (patch as { page?: string }).page || '');
+                    const target = pageId && this.pages.has(pageId)
+                        ? this.pages.get(pageId)
+                        : (this.pages.get(this.activeId) || null);
+                    const capture = (target as {
+                        captureScreenshot?: (name?: string) => void;
+                    } | null)?.captureScreenshot;
+                    const download = (target as {
+                        screenshot?: () => void;
+                    } | null)?.screenshot;
+                    const name = String(
+                        (patch as { name?: string }).name || '');
+                    try {
+                        if (typeof capture === 'function') {
+                            capture.call(target, name || undefined);
+                        } else if (typeof download === 'function') {
+                            download.call(target);
+                        } else {
+                            // 当前页没有图表（代码页 / 报价页）→ 立刻回空结果，
+                            // 免得工具一直等到超时 ✓
+                            this.send('screenshot', {
+                                dataUrl: '',
+                                error: '当前页没有图表（先切到实时 / 本地图表）',
+                            });
+                        }
+                    } catch (error) {
+                        this.send('screenshot', {
+                            dataUrl: '',
+                            error: `前端截图出错：${String(error)}`,
+                        });
+                    }
                 }
                 break;
             }
             case 'workbench':
                 this.workbenchPage?.apply(patch);
                 break;
+            case 'pi_cleanup': {
+                const removed = Number(
+                    (patch as { removed?: number }).removed || 0);
+                this.toast(removed ? 'success' : 'info',
+                    removed ? `已清理 ${removed} 个重复 / 空会话`
+                        : '没有需要清理的会话');
+                break;
+            }
+            case 'ta_signals': {
+                const pageId = String((patch as { page?: string }).page || '');
+                const target = this.pages.get(pageId)
+                    || this._activeChartPage() || this._activeLocalPage();
+                (target as unknown as {
+                    setTaSignal?: (data: Record<string, unknown>) => void;
+                } | null)?.setTaSignal?.(patch as never);
+                break;
+            }
+            case 'ta_snapshot':
+            case 'ta_template':
+            case 'ta_options': {
+                this.symbolInfoPage?.apply(patch);
+                break;
+            }
+            case 'info_symbol_events': {
+                const pageId = String((patch as { page?: string }).page || '');
+                const target = this.pages.get(pageId)
+                    || this._activeChartPage() || this._activeLocalPage();
+                (target as unknown as {
+                    setSymbolEvents?: (rows: unknown[]) => void;
+                } | null)?.setSymbolEvents?.(
+                    ((patch as { items?: unknown[] }).items) || []);
+                break;
+            }
+            case 'info_related': {
+                this.infoPage?.apply(patch);
+                break;
+            }
+            case 'ai_summary': {
+                this.infoPage?.apply(patch);
+                // 有会话 → 打开 PI 页看摘要（缓存 / 新生成都可以 ✓）
+                const sessionId = String(
+                    (patch as { session_id?: string }).session_id || '');
+                if (sessionId) {
+                    const page = this.openPiWorkspace();
+                    page.editorPanel.openPiSession(sessionId);
+                }
+                break;
+            }
+            case 'info_macro': {
+                this.infoPage?.apply(patch);
+                break;
+            }
+            case 'info_symbol': {
+                // 两个页面都可能用：标的资料页优先看 `page` 字段 ✓
+                if (String((patch as { page?: string }).page || '')
+                    === 'symbol-info:app') {
+                    this.symbolInfoPage?.apply(patch);
+                } else {
+                    this.infoPage?.apply(patch);
+                }
+                break;
+            }
+            case 'info_news':
+            case 'info_status': {
+                if (String((patch as { page?: string }).page || '')
+                    === 'symbol-info:app') {
+                    this.symbolInfoPage?.apply(patch);
+                }
+                this.infoPage?.apply(patch);
+                // 设置页「资讯数据源」也要看到状态 ✓
+                if (patch.type === 'info_status') {
+                    this.settingsPage?.setInfoStatus?.(patch);
+                }
+                break;
+            }
+            case 'info_calendar': {
+                this.infoPage?.apply(patch);
+                // ★ 首页「事件日历」用的是同一份数据（带 events 的补丁 ✓）
+                const events = (patch as { events?: unknown }).events;
+                if (Array.isArray(events) && events.length) {
+                    this.home?.setEvents?.(events as never);
+                }
+                // 宏观日历**不上图**（用户 2026-11-08）：只有标的专属事件才打点 ✓
+                break;
+            }
             case 'research':
             case 'research_state':
             case 'research_progress':
@@ -2708,11 +3454,51 @@ export class DeskApp {
                 this.datahubPage?.apply(patch);
                 break;
             case 'ops':
+                this.opsPage?.apply(patch);
+                // ★ v1.3.7-91：告警通道搬到设置页 → 它也从快照里拿一份 ✓
+                this.settingsPage?.setNotify({
+                    notify: (patch as { notify?: unknown }).notify || {},
+                    alert_rules: (patch as { alert_rules?: unknown })
+                        .alert_rules || [],
+                    alert_settings: (patch as { alert_settings?: unknown })
+                        .alert_settings || {},
+                });
+                if ((patch as { equity?: unknown }).equity) {
+                    this.settingsPage?.setEquity({
+                        stats: (patch as { equity?: unknown }).equity,
+                    });
+                }
+                break;
+            case 'ops_equity':
+                this.settingsPage?.setEquity(patch);
+                break;
             case 'ops_token':
-            case 'ops_tasks':
-            case 'ops_notify':
             case 'ops_versions':
                 this.opsPage?.apply(patch);
+                break;
+            case 'ops_notify':
+                this.opsPage?.apply(patch);
+                this.settingsPage?.setNotify({
+                    notify: (patch as { notify?: unknown }).notify || {} });
+                break;
+            case 'ops_alert_log':
+                this.alertLogPage?.apply(patch);
+                break;
+            case 'ops_alert_rules':
+                this.settingsPage?.setNotify({
+                    alert_rules: (patch as { rules?: unknown }).rules || [],
+                    alert_settings: (patch as { settings?: unknown }).settings
+                        || {},
+                });
+                break;
+            // ★ v1.3.7-88：定时任务独立成页 —— 它的补丁只给 SchedulePage ✓
+            case 'ops_tasks':
+            case 'ops_catalog':
+            case 'ops_task_output':
+            case 'ops_task_export':
+            case 'ops_task_import_result':
+            case 'ops_holidays':
+                this.schedulePage?.apply(patch);
                 break;
             case 'preview': {
                 const data = patch.data || {};
@@ -2792,12 +3578,17 @@ export class DeskApp {
             case 'settings': {
                 const settings = (patch.settings || {}) as Record<string, unknown>;
                 this.settingsValues = settings as SettingsValues;
+                // ★ 悬浮球颜色（重启 / 别处改过 → 这里恢复 ✓）
+                this.piFloat?.setBallColor(
+                    String(settings.pi_float_color || ''));
                 this._applySettings(settings);          // 缩放 / 主题色 / 图表项 ✓
                 // ★ 买卖盘**每次启动 / 新开图表都从「关」开始**（用户 2026-11-05 ✓）
                 this.ticketsOn = false;
                 this.settingsPage?.setValues({
                     ...this.settingsValues, theme: this.theme,
                 });
+                // 用户刚才在输入 → setValues 只是记了「待重画」；这里补一次 ✓
+                window.setTimeout(() => this.settingsPage?.repaint(), 400);
                 this.quotePage?.setSettings?.(settings);
                 this.pages.forEach((page) => {
                     if (page instanceof ChartPage
@@ -2805,6 +3596,24 @@ export class DeskApp {
                         page.setSettings(settings);
                     }
                 });
+                break;
+            }
+            case 'ai_desk_settings': {
+                // ★ PI 操控 desk 的开关（设置页）✓
+                this.settingsValues = {
+                    ...this.settingsValues,
+                    ai_desk_allow: patch.allow !== false,
+                    ai_desk_order: patch.order === true,
+                } as SettingsValues;
+                this.settingsPage?.setValues({
+                    ...this.settingsValues, theme: this.theme,
+                });
+                break;
+            }
+            case 'ai_audit': {
+                // ★ 审计日志 → 设置页显示 ✓
+                this.settingsPage?.setAudit(
+                    (patch.items || []) as Array<Record<string, unknown>>);
                 break;
             }
             case 'sim_analysis': {
@@ -3196,38 +4005,94 @@ export class DeskApp {
             case 'explorer_op':
             case 'explorer_personal':
             case 'editor_formatted':
-            case 'editor_deleted': {
-                // 看盘窗口 / **本地图表**都有编辑器（P68 ✓）
+            case 'editor_formatted_range':
+            case 'debug_state':
+            case 'terminal_output':
+            case 'repl_result':
+            case 'editor_deleted':
+            {
+                // 看盘窗口 / 本地图表 / **PI 独立界面**都有编辑器 ✓
                 const page = (this.pages.get(this.activeId) || null) as
                     | ChartPage | LocalChartPage | null;
-                const panel = page?.editorPanel;
+                const panel = page?.editorPanel
+                    || this._editorPanels()[0];
                 if (!panel) break;
                 if (patch.type === 'editor_files') {
                     // 老补丁（个人指标 / 策略两栏）已被资源管理器取代 → 忽略 ✓
                     break;
                 } else if (patch.type === 'editor_file') {
-                    panel.setFile((patch.file || {}) as never);
+                    panel.setFile?.((patch.file || {}) as never);
                 } else if (patch.type === 'editor_saved') {
-                    panel.markSaved(String(patch.path || ''));
+                    panel.markSaved?.(String(patch.path || ''));
                     if (typeof patch.text === 'string') {
-                        panel.setFormatted(String(patch.path || ''),
+                        panel.setFormatted?.(String(patch.path || ''),
                                            String(patch.text), 'save');
                     }
                 } else if (patch.type === 'editor_check') {
-                    panel.setCheck(String(patch.path || ''),
+                    panel.setCheck?.(String(patch.path || ''),
                                    (patch.result || {}) as never);
                 } else if (patch.type === 'explorer') {
-                    panel.setExplorer(patch as never);
+                    panel.setExplorer?.(patch as never);
                 } else if (patch.type === 'explorer_personal') {
-                    panel.setPersonalKind((patch.kind || '') as never);
+                    panel.setPersonalKind?.((patch.kind || '') as never);
                 } else if (patch.type === 'editor_formatted') {
-                    panel.setFormatted(String(patch.path || ''),
+                    panel.setFormatted?.(String(patch.path || ''),
                                        String(patch.text || ''),
                                        String(patch.tool || 'basic'));
+                } else if (patch.type === 'editor_formatted_range') {
+                    panel.setFormattedRange?.(String(patch.path || ''),
+                                            String(patch.text || ''));
+                } else if (patch.type === 'debug_state') {
+                    panel.setDebugState?.(patch as never);
+                } else if (patch.type === 'terminal_output') {
+                    panel.setTerminalOutput?.(String(patch.text || ''));
+                } else if (patch.type === 'repl_result') {
+                    panel.setReplResult?.(String(patch.output || ''),
+                                        patch.ok === false ? 'error' : '');
                 } else if (patch.type === 'editor_deleted') {
-                    panel.remove(String(patch.path || ''));
+                    panel.remove?.(String(patch.path || ''));
                 }
-                // `explorer_op` 只用来刷界面（结果已经由 explorer 补丁带回 ✓）
+            }
+            case 'pi_status':
+                this._piVersion = String(
+                    (patch as { piVersion?: string }).piVersion || '');
+            case 'ai_files':
+            case 'pi_sessions':
+            case 'pi_session':
+            case 'pi_history':
+            case 'pi_event':
+            case 'pi_models':
+            case 'pi_skills':
+            case 'pi_skills_search':
+            case 'pi_skills_install':
+            case 'pi_deleted':
+            case 'pi_imported': {
+                // ★ PI 助手：所有带编辑器的页面都收（图表页 + PI 独立界面 ✓）
+                for (const panel of this._editorPanels()) {
+                    panel.piOnPatch?.(patch);
+                }
+                this.piFloat?.piOnPatch(patch);
+                break;
+            }
+            case 'ai_ping': {
+                // 模型对话框里的「测试连接」用 ✓
+                for (const panel of this._editorPanels()) {
+                    panel.piPingResult?.(patch);
+                }
+                if (patch.ok) {
+                    this.toast('success',
+                        `PI 连接正常（${String(patch.model || '')} · `
+                        + `${Number(patch.ms || 0)} ms）`);
+                } else {
+                    this.toast('warning',
+                        `PI 连接失败：${String(patch.error || '')}`);
+                }
+                break;
+            }
+            case 'ai_insert_code': {
+                const page = (this.pages.get(this.activeId) || null) as
+                    | ChartPage | LocalChartPage | null;
+                page?.editorPanel?.insertAtCursor(String(patch.code || ''));
                 break;
             }
             case 'ask_folder': {
@@ -3382,26 +4247,43 @@ export class DeskApp {
                 const symbol = String(patch.symbol || '');
                 const page = this._chartPageFor(symbol);
                 if (page instanceof ChartPage) page.setAlerts(items);
-                // ★ 预警线对**本地模拟**也生效：本地图表按合约匹配 ✓
-                const locals = [...this.pages.values()].filter(
-                    (item): item is LocalChartPage =>
-                        item instanceof LocalChartPage);
-                const matched = locals.filter(
-                    (item) => item.localDataName === symbol);
-                for (const local of (matched.length ? matched : locals)) {
-                    local.setAlerts(items);
-                }
+                // ★ 本地图表的预警是**页面自己管**的（本地数据没有行情源，
+                //   触发也在前端判定）→ 不再把实时页的预警灌进去 ✗
+                //   （以前会把别的页的预警显示到本地图表上，点删除还会删错 ✓）
                 break;
             }
             case 'alert_fired': {
                 // ★ 价格按**合约小数位**显示（`decimals` 由后端 price_tick 推 ✓）
+                const account = String(patch.account || '');
+                const where = String(patch.account_label || '') || '当前账户';
                 const text = `${patch.symbol} 触发预警 `
                     + `${fmtPrice(patch.price, patch.decimals)}`
-                    + `（最新 ${fmtPrice(patch.last, patch.decimals)}）→ 下单？`;
+                    + `（最新 ${fmtPrice(patch.last, patch.decimals)}）`
+                    + `
+触发账户：${where}` + `
+→ 下单？`;
                 if (!window.confirm(text)) break;
+                if (account === 'local') {
+                    // 本地图表 = 本地模拟账户（`local_sim` 记账，不动真账户 ✓）
+                    const side = String(patch.action || 'buy');
+                    this.send('local_order', {
+                        symbol: patch.symbol,
+                        side: side === 'close' ? 'sell' : side,
+                        offset: side === 'close' ? 'close' : 'open',
+                        volume: patch.qty || 1, qty: patch.qty || 1,
+                        price: patch.price,
+                        label: '预警触发',
+                    });
+                    break;
+                }
                 this.send('place_order', {
                     symbol: patch.symbol, side: patch.action || 'buy',
                     volume: patch.qty || 1, price: patch.price,
+                    // ★ 必须带上「创建预警那一页 / 那一格」的账户 ✓
+                    account, page: patch.page || '',
+                    cell: patch.cell,
+                    offset: String(patch.action || '') === 'close'
+                        ? 'close' : 'open',
                 });
                 break;
             }
@@ -3762,6 +4644,20 @@ export class DeskApp {
                 }
                 return;
             }
+            if (event.key === 'F10') {
+                // ★ 用户 2026-11-08：F10 = 当前图表的**标的资讯**（同 A 股软件 ✓）
+                event.preventDefault();
+                this._openSymbolInfoFromChart();
+                return;
+            }
+            if (event.key === 'F1') {
+                // ★ AI 悬浮窗：**F1**（用户 2026-11-08 —— `Ctrl+Alt+A` 被微信
+                //   截图快捷键抢走了，按了没反应 ✗）
+                event.preventDefault();
+                if (this.piFloat) this.piFloat.toggle();
+                else this.openPiFloat();
+                return;
+            }
             if (mod && event.key === 'Tab') {
                 const ids = [...this.tabs.keys()];
                 if (ids.length < 2) return;
@@ -3780,20 +4676,23 @@ export class DeskApp {
         this.logPage?.setTheme(theme);
         this.settingsPage?.setTheme?.(theme);
         this.palette?.applyTheme(theme);
+        // ★ 不要再写页面白名单了：以前漏了 `PiPage`（PI 独立界面的代码页）
+        //   → 切浅色主题时那边的 CodeMirror 还是黑的（用户 2026-11-08 实测 ✗）。
+        //   现在按「有没有 applyTheme」鸭子类型统一调用，以后新页面自动跟随 ✓
         for (const page of this.pages.values()) {
-            if (page instanceof ChartPage || page instanceof LocalChartPage
-                || page instanceof StrategyLabPage
-                || page instanceof WorkspacePage
-                || page instanceof ReplayLabPage
-                || page instanceof AlertCenterPage
-                || page instanceof WorkbenchPage
-                || page instanceof ResearchPage
-                || page instanceof DataPage
-                || page instanceof OpsPage) {
-                page.applyTheme(theme);
+            const apply = (page as unknown as {
+                applyTheme?: (value: 'light' | 'dark') => void;
+            }).applyTheme;
+            if (typeof apply !== 'function') continue;
+            try {
+                apply.call(page, theme);
+            } catch (error) {
+                // 单个页面出错不影响其它页面切主题 ✓
+                console.warn('applyTheme failed', error);
             }
         }
         if (this.tvPage) this.tvPage.applyTheme(theme);
+        this.piFloat?.setTheme(theme);
         this.root.classList.toggle('theme-light', theme === 'light');
         this.root.classList.toggle('theme-dark', theme !== 'light');
         document.body.classList.toggle('theme-light', theme === 'light');

@@ -20,7 +20,7 @@ whatever the host supplies::
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -109,6 +109,47 @@ def _tristate(value, buy_when_above=None, sell_when_below=None) -> str:
     return 'neutral'
 
 
+#: 信号词 → 数值（和 minibt.signals 的 -1/0/1 对齐 ✓）
+SIGNAL_VALUES = {'buy': 1, 'neutral': 0, 'sell': -1}
+
+
+def ta_groups(rows: Sequence[dict]) -> dict:
+    """信号行 → `groups / score / label / counts`（v1.3.7-73 ✓）
+
+    `rows` 元素：`{name, value, signal(1/0/-1 或 buy/neutral/sell),
+    group(oscillator/trend/other), note?, weight?}`
+    """
+    groups = {'oscillator': [], 'trend': [], 'other': []}
+    labels = {'oscillator': '震荡指标', 'trend': '趋势指标', 'other': '其他指标'}
+    total = weight_sum = 0.0
+    counts = {'buy': 0, 'neutral': 0, 'sell': 0}
+    for row in rows or []:
+        signal = row.get('signal', 0)
+        if isinstance(signal, str):
+            signal = SIGNAL_VALUES.get(signal, 0)
+        try:
+            value = 1 if float(signal) > 0 else (-1 if float(signal) < 0 else 0)
+        except (TypeError, ValueError):
+            value = 0
+        key = str(row.get('group') or 'other')
+        if key not in groups:
+            key = 'other'
+        weight = float(row.get('weight') or 1.0)
+        groups[key].append({**row, 'signal': value})
+        counts['buy' if value > 0 else ('sell' if value < 0
+                                        else 'neutral')] += 1
+        total += value * weight
+        weight_sum += weight
+    score = (total / weight_sum) if weight_sum else 0.0
+    label = 'BUY' if score > 0.15 else ('SELL' if score < -0.15
+                                        else 'NEUTRAL')
+    return {
+        'score': round(score, 4), 'label': label, 'counts': counts,
+        'groups': [{'key': key, 'label': labels[key], 'rows': groups[key]}
+                   for key in ('oscillator', 'trend', 'other')],
+    }
+
+
 def ta_summary(frame: pd.DataFrame, *, price: str = 'close') -> dict:
     """Compute a TradingView-style summary from a price frame.
 
@@ -190,8 +231,16 @@ def ta_summary(frame: pd.DataFrame, *, price: str = 'close') -> dict:
     score = sum(weights.get(signal, 0.0) for signal in signals) / len(signals) \
         if signals else 0.0
     counts = {name: signals.count(name) for name in ('buy', 'neutral', 'sell')}
-    return {'score': round(score, 4), 'counts': counts,
-            'oscillators': oscillators, 'moving_averages': moving_averages}
+    # ★ v1.3.7-73：额外给 `groups`（震荡 / 趋势 / 其他）—— 前端新面板用，
+    #   旧字段保留（向后兼容 ✓）
+    rows = [dict(row, group='oscillator') for row in oscillators] \
+        + [dict(row, group='trend') for row in moving_averages]
+    result = {'score': round(score, 4), 'counts': counts,
+              'oscillators': oscillators, 'moving_averages': moving_averages}
+    result.update(ta_groups(rows))
+    result['score'] = round(score, 4)      # 旧的 score 定义保持不变 ✓
+    result['counts'] = counts
+    return result
 
 
 class TechnicalAnalysis(Panel):

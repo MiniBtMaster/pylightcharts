@@ -28,6 +28,10 @@ export interface NewsFeedOptions {
     openLinks?: boolean;
     theme?: NewsTheme;
     onItemClick?: (index: number) => void;
+    /** 右键某条（index + 原生事件）→ 宿主弹自己的菜单 ✓ */
+    onItemContextMenu?: (index: number, event: MouseEvent) => void;
+    /** 双击某条（默认 = 打开原文；宿主可覆盖 ✓） */
+    onItemDoubleClick?: (index: number) => void;
 }
 
 interface ResolvedTheme {
@@ -66,12 +70,16 @@ export class NewsFeed {
     private _openLinks: boolean;
     private _theme: ResolvedTheme;
     private _onItemClick?: (index: number) => void;
+    private _onItemContextMenu?: (index: number, event: MouseEvent) => void;
+    private _onItemDoubleClick?: (index: number) => void;
 
     constructor(options: NewsFeedOptions = {}, parent?: HTMLElement | null) {
         ensureStyle(STYLE_ID, CSS);
         this._openLinks = options.openLinks ?? true;
         this._theme = this._resolveTheme(options.theme ?? {});
         this._onItemClick = options.onItemClick;
+        this._onItemContextMenu = options.onItemContextMenu;
+        this._onItemDoubleClick = options.onItemDoubleClick;
         this.element = document.createElement('div');
         this.element.className = 'pylc-news';
         this._applyThemeVars();
@@ -147,21 +155,31 @@ export class NewsFeed {
                 summary.textContent = item.summary;
                 node.appendChild(summary);
             }
-            node.addEventListener('click', () => this._select(index, item));
+            // ★ 默认行为在 v1.3.7-72 改了：**左键不再直接跳 / 开**（宿主决定）
+            node.addEventListener('dblclick', () => {
+                if (this._onItemDoubleClick) {
+                    this._onItemDoubleClick(index);
+                    return;
+                }
+                if (this._openLinks && item.url) {
+                    window.open(item.url, '_blank', 'noopener');
+                }
+            });
+            // 左键：宿主需要时可接（默认不做事 ✓ v1.3.7-72）
+            node.addEventListener('click', () => {
+                if (this._onItemClick) this._onItemClick(index);
+                else if (this.callbackName) {
+                    emitCallback(this.callbackName, String(index));
+                }
+            });
+            node.addEventListener('contextmenu', (event) => {
+                if (this._onItemContextMenu) {
+                    event.preventDefault();
+                    this._onItemContextMenu(index, event);
+                }
+            });
             this.element.appendChild(node);
         });
     }
 
-    private _select(index: number, item: NewsItem): void {
-        if (this._openLinks && item.url) {
-            window.open(item.url, '_blank', 'noopener');
-        }
-        if (this.callbackName) {
-            emitCallback(this.callbackName, String(index));
-            return;
-        }
-        if (this._onItemClick) {
-            this._onItemClick(index);
-        }
-    }
 }

@@ -28,6 +28,8 @@ export interface CodeEditorOptions {
     onCursor?: (line: number, column: number) => void;
     /** 只读（指标源码预览 ✓） */
     readOnly?: boolean;
+    /** 行号左侧断点栏点击（0 基行号；v1.3.7 断点调试 ✓） */
+    onGutterClick?: (line: number) => void;
 }
 
 interface EditorHandle {
@@ -38,6 +40,17 @@ interface EditorHandle {
     getSelection(): string;
     insert(text: string): void;
     selectAll(): void;
+    /** v1.3.7：断点 / 字号 / 选区 / 重命名 / 引用（desk-editor.js 提供 ✓） */
+    setBreakpoints?: (lines: number[]) => void;
+    setFontSize?: (px: number) => void;
+    getSelectionRange?: () => { from: number; to: number; text: string };
+    replaceSelection?: (text: string) => void;
+    renameSymbol?: (newName: string) => Promise<{
+        ok: boolean; changed: number; others: string[]; error?: string }>;
+    findReferences?: () => Promise<Array<{
+        path: string; line: number; name: string }>>;
+    jumpToLine?: (line: number) => void;
+    format?: () => void;
 }
 
 interface EditorBundle {

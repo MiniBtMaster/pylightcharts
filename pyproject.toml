@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pylightcharts"
-version = "0.1.9"
+version = "0.2.0"
 description = "TradingView Lightweight Charts for Python (bridged, near-full API coverage)"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,6 +32,8 @@ dependencies = [
 
 [project.optional-dependencies]
 qt = ["PySide6"]
+# 资讯 / 财经日历（AkShare 可选：不装也能用 desk，只是没有资讯页数据 ✓）
+news = ["akshare>=1.12"]
 jupyter = ["ipython"]
 test = ["pytest", "pillow"]
 e2e = ["playwright", "pillow"]

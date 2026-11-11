@@ -36,7 +36,8 @@ def test_theme_palettes_and_broadcast():
 
     app = _read(DESK_TS / 'app.ts')
     assert 'this.quotePage?.applyTheme(theme)' in app
-    assert 'page.applyTheme(theme)' in app
+    # ★ v1.3.7-56：页面不再用类白名单，改鸭子类型统一调 `applyTheme`
+    assert 'apply.call(page, theme);' in app
     assert 'this.send(\'alerts\', {})' in app
 
     quote = _read(DESK_TS / 'quote-page.ts')

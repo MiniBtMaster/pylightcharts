@@ -5,6 +5,90 @@ All notable changes to `pylightcharts` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-11-11
+
+本版是 **0.x 系列里第一个"Python + 前端都动"的功能版**（0.1.9 是纯资源版）：
+
+- **Python 侧**：`create_histogram()` 新增 `base=`（柱状图基准价，MACD 上下双色）、
+  新增公开工具函数 `pylightcharts.colors.normalize_color()`、
+  `panels.technical.ta_summary()` 返回新增 `groups`（震荡 / 趋势 / 其他三组）；
+- **前端侧**：`pylightcharts/js/` 由 `jslib/` 重建 —— `desk.js` 945 KB →
+  **1205.7 KB**（1234611 B），`desk.css` 119.5 KB → **187.2 KB**（191739 B），
+  `desk-editor.js` **861671 B**，`bundle.js` / `lightweight-charts.js` /
+  `styles.css` 未变；`desk.html` 缓存令牌 **`desk.js?v=mwc03md6`**；
+- 随 wheel 交付的 **minibt desk** 一次跨完 v1.3.7 的 **109 轮迭代**
+  （告警中心、定时任务 v2、PI 助手 / MCP 工具桥、TA 悬浮标签、命令行工具……）。
+
+### Added
+
+- **`create_histogram(..., base=None)`**：柱状图可以用 `base` 指定基准价，
+  `base` 以上 / 以下自动取 `up_color` / `down_color`（MACD 柱就是这样双色的）。
+  不传 `base` 时行为与 0.1.9 完全一致（零破坏）。
+- **`pylightcharts.colors.normalize_color(color)`**（`__all__` 里公开）：把颜色
+  规范成引擎认识的写法，`rgba()` 的 alpha 一律换算到 **0~1**（原来传 `200`
+  会变成几乎全透明）。`color_by()` / `condition_mask()` 内部已统一走它。
+- **`panels.technical.ta_summary()` 返回值新增 `groups`**：形如
+  `[{'key': 'oscillator', 'label': '震荡指标', 'rows': [...]}, …]`（固定三段：
+  震荡 / 趋势 / 其他，每段带该组 `signal` 归一后的行），前端 TA 面板据此分段展示。
+- desk 前端（随 wheel 交付）：
+  - **告警体系**：4 个通道（企业微信 / 微信公众号 xtuis / 邮件 / 通用 webhook）、
+    **16 条告警规则**（按交易 / 预警 / 行情 / 定时任务 / 持仓 / 策略 / 资讯 / 系统分组，
+    每条可单独开关 + 阈值）、**告警中心页**（按天时间轴、搜索、等级筛选、
+    一键复现到图表、近 14 天柱状图、静默压制留痕）、静默时段、每日汇总、
+    自定义关键词；**只推本次运行里即时发生的事件**（历史数据不补发）。
+  - **定时任务 v2（独立成页）**：`interval / daily / manual / after(DAG)` 四种触发、
+    `builtin / tool / ai / sequence` 四种动作、`when` 前置条件、重试、补跑、
+    防重入 / 每日上限 / 只在交易时段 / 跳过节假日、6 个模板、导入导出、任务级通知。
+  - **PI 助手 / MCP 工具桥**：零 npm 的内置 PI 面板（会话、分屏、分支、思考折叠、
+    用量）、悬浮窗、**72 个 MCP 工具**（图表 / 编辑器 / 交易 / 数据 / 研究 / 预警 /
+    布局 / 定时任务）、危险工具 `confirm` 闸门、全量审计、Markdown 表格渲染、
+    圆点导航悬停「问 + 答」预览、技能搜索。
+  - **图表**：TA 信号悬浮标签（默认开，可关；悬停卡片列出每个指标的看多 / 看空 /
+    中立与数值）、多布局每格独立周期、成交量分布 / 动态表格跟随、回顶按钮。
+  - **设置页**：告警通道与阈值、TA 模板保存 / 启用、`ta_badge` 开关、
+    净值曲线 sparkline（峰值 / 回撤 / 当日盈亏）。
+  - **`python -m minibt.desk.cli`**：`doctor / status / snapshot / tasks / run /
+    history / rpc`，token 三来源，错误信息中文化，支持 `--json`。
+
+### Changed
+
+- **`pylightcharts/js/desk.*` 全量重建**（对应 minibt v1.3.7 的 109 轮改动）。
+  跨版本升级时请**同批**升级 minibt 与 pylightcharts，前端行为与后端回执是对齐的。
+- **工作台 / 研究 / 数据平台 / 运维** 四个扩展入口在 desk 界面上**注释关闭**
+  （功能频率低、尚未完善）；定时任务页保留；命令 / REST / MCP 工具都还在。
+- **定时任务默认停用**，需要手动启用；`strategy_live` 等规则默认值保持原样。
+- 告警通道从「运维页」搬到「系统设置 → 告警通道」（一个地方配，避免两处不一致）。
+
+### Fixed
+
+- **桌面图表残留指标删不掉**：`pta_*` / `tqta_*` 这类完整库指标是后台线程算的，
+  补丁带 `pending` 时前端"只加不删"，后端删掉后图上还留着旧序列，而删除菜单
+  按后端列表渲染 → 列表里看不到、也就删不掉。现在后端下发 `pending_keys`，
+  前端只保留 `items ∪ pending_keys`；`removeSource()` 会先物理删注册表里的序列；
+  后端删除匹配改为**忽略大小写 + 忽略 `:线名` 后缀**。
+- **TA 首帧报错**：数据不足 / 计算失败改为友好文案（不再抛 `NoneType`），
+  8 秒后自动重算一次。
+- **技能搜索 404**：skills.sh 接口从 `/api/skills` 更正为 `/api/search`。
+- **测试误推真实微信**：`tests/conftest.py` 会话级隔离 ops 目录 +
+  `Notifier._muted()`（检测真实配置 / pytest 环境）+ `MINIBT_DESK_NO_NOTIFY`。
+- **告警只认即时事件**：资讯关键词 / 自选新闻首扫只做基线，日历 `stale` 不推，
+  持仓风险 / 策略回撤只在**刚破阈值**推一次（回落重置）。
+- **多布局删除副图会连带删掉下一个**：改按 pane 对象身份重算下标，从后往前删。
+- `pylightcharts/js` 里 `qwebchannel.js` 不再随包发布（desk 运行时会按需写入，
+  避免与宿主 Qt 版本不一致）。
+
+### Notes
+
+- **版本一致性**：`pyproject.toml` / `__init__.py`（docstring + `__version__` +
+  `__version_info__`）三处都是 `0.2.0`，`tests/test_packaging.py::test_version_is_consistent`
+  强制校验。
+- **API 文档**：`docs/api.md` 已重跑 `scripts/gen_api_docs.py`，
+  新增 `create_histogram(base=)` 与 `normalize_color()` 两处。
+- **测试基线**：`pytest -k "desk or packaging or docs or signals"`
+  **2146 passed / 1 skipped / 2 failed**（两项历史失败：缺 `tutorials/cci.py`、
+  `tutorials/cmo.py`，与包本身无关）；`vitest` **146 passed**；`tsc` 干净。
+- **上传仍需人工**：`python -m twine upload dist/*`（需要 PyPI API token）。
+
 ## [0.1.9] - 2026-11-06
 
 本版是 **纯前端资源版本**：Python 侧（`abstract.py` / `chart.py` / `headless.py` /

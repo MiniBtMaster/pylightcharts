@@ -7,11 +7,15 @@
  *
  * 本文件只做「把 CodeMirror 组装成一个 EditorView」，与 UI 无关 ✓
  */
-import { EditorState, EditorSelection, type Extension } from '@codemirror/state';
+import {
+    EditorState, EditorSelection, RangeSet, RangeSetBuilder,
+    StateEffect, StateField, type Extension,
+} from '@codemirror/state';
 import {
     EditorView, keymap, lineNumbers, highlightActiveLine,
     highlightActiveLineGutter, drawSelection, dropCursor,
     rectangularSelection, highlightSpecialChars, placeholder,
+    gutter, GutterMarker,
 } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab,
     toggleComment } from '@codemirror/commands';
@@ -52,6 +56,8 @@ export interface MountSpec {
     onCursor?: (line: number, column: number) => void;
     /** 只读（指标源码预览：不能改、不能存 ✓） */
     readOnly?: boolean;
+    /** 左侧断点栏点击 → 行号（0 基；v1.3.7 断点调试 ✓） */
+    onGutterClick?: (line: number) => void;
 }
 
 export interface EditorHandle {
@@ -75,6 +81,22 @@ export interface EditorHandle {
         name: string; kind: number; path: string; line: number }>>;
     /** 跳到某一行（大纲点击 / 跳转定义后 ✓） */
     jumpToLine(line: number): void;
+
+    // ---- v1.3.7：断点调试 / 重命名 / 引用 / 选区格式化 / 字号 ----
+    /** 设置断点行（0 基行号数组）→ 左侧红点 ✓ */
+    setBreakpoints(lines: number[]): void;
+    /** 浏览器字号（跟 desk 缩放 / 设置联动 ✓） */
+    setFontSize(px: number): void;
+    /** 当前选区原文（没选中返回 ''） */
+    getSelectionRange(): { from: number; to: number; text: string };
+    /** 用新文本替换当前选区（没选中就插在光标处 ✓） */
+    replaceSelection(text: string): void;
+    /** 重命名符号（LSP `textDocument/rename`；只应用**本文档**的修改 ✓） */
+    renameSymbol(newName: string): Promise<{
+        ok: boolean; changed: number; others: string[]; error?: string }>;
+    /** 查找引用（LSP `textDocument/references`）✓ */
+    findReferences(): Promise<Array<{
+        path: string; line: number; name: string }>>;
 }
 
 /**
@@ -167,6 +189,21 @@ const KLINE_FIELDS = ('open high low close volume amount open_interest '
     + 'datetime duration symbol position')
     .split(' ');
 
+/** 指标族（`kline.` 后面紧跟的库访问器 ✓） */
+const KLINE_LIBS = ('pta tulip talib finta tqta tqfunc btind pine tradingview '
+    + 'pairtrading factors indicators').split(' ');
+
+/** 下单 / 交易相关（`api.` / `self.` 后面 ✓） */
+const ORDER_API = ('insert_order get_order get_position get_position_list '
+    + 'get_account cancel_order wait_update is_changing get_quote '
+    + 'get_kline_serial insert_order_target insert_order_volume target_pos '
+    + 'get_trade_list quote account position').split(' ');
+
+/** 指标绘制相关（`plotinfo.` / `PlotInfo(` 里的常客 ✓） */
+const PLOT_KEYS = ('overlap isplot ismain iscandles linestyle bandstyle '
+    + 'signalstyle tablestyle spanstyle candlestyle category plot_index '
+    + 'isresample iscustom lines params').split(' ');
+
 function words(list: string[]): Completion[] {
     return list.map((label) => ({ label, type: 'keyword' }));
 }
@@ -174,6 +211,24 @@ function words(list: string[]): Completion[] {
 function apiWords(list: string[]): Completion[] {
     return list.map((label) => ({ label, type: 'function' }));
 }
+
+/** 各指标库的**常用**函数名（两级前缀 `kline.<lib>.` 时给这些 ✓） */
+const INDICATOR_HINTS: Record<string, string[]> = {
+    pta: ('sma ema wma rsi macd bbands atr obv stoch adx cci mfi '
+        + 'supertrend vwap kc donchian').split(' '),
+    talib: ('SMA EMA RSI MACD BBANDS ATR ADX CCI OBV STOCH SAR MIN MAX '
+        + 'MOM ROC TRIX WILLR').split(' '),
+    tulip: ('sma ema wma rsi macd atr bbands stoch adx cci obv mfi '
+        + 'supertrend vwap').split(' '),
+    finta: ('SMA EMA RSI MACD BBANDS ATR ADX CCI OBV STOCH').split(' '),
+    tqta: ('SMA EMA RSI MACD BBANDS ATR ADX CCI OBV STOCH SAR').split(' '),
+    tqfunc: ('SMA EMA RSI MACD BBANDS ATR').split(' '),
+    btind: ('supertrend pmax zigzag kama mama rngfilt vwap_window '
+        + 'gaussian_smoothed divergence').split(' '),
+    pine: ('ta sma ema rsi macd atr stoch').split(' '),
+    tradingview: ('UT_Bot_Alerts SuperTrend MACD RSI BollingerBands '
+        + 'RollingVolumeProfile').split(' '),
+};
 
 /** 依据光标前的 `xxx.` 选补全表 ✓ */
 function pythonCompletions(context: CompletionContext):
@@ -187,8 +242,14 @@ function pythonCompletions(context: CompletionContext):
         Math.max(0, word.from - 24), word.from);
     const match = /([A-Za-z_][\w]*)\.\w*$/.exec(`${before}${text}`);
     const owner = match ? match[1] : '';
+    // `kline.pta.` / `self.kline.talib.` → 两级前缀也要认（指标库访问器 ✓）
+    const double = /\w*(kline|self\.kline)\.(\w+)\.\w*$/.exec(
+        `${before}${text}`);
     let options: Completion[];
-    if (!owner) {
+    if (double) {
+        // 指标库里的函数名太多 → 给常用的一批（`INIDCATOR_HINTS` ✓）
+        options = apiWords(INDICATOR_HINTS[double[2]] || []);
+    } else if (!owner) {
         options = [...words(PY_KEYWORDS), ...apiWords(MINIBT_API)];
     } else if (owner === 'np' || owner === 'numpy') {
         options = apiWords(NUMPY_API);
@@ -197,7 +258,12 @@ function pythonCompletions(context: CompletionContext):
     } else if (owner === 'minibt' || owner === 'bt') {
         options = apiWords(MINIBT_API);
     } else if (owner === 'kline' || owner === 'self') {
-        options = [...apiWords(KLINE_FIELDS), ...apiWords(MINIBT_API)];
+        options = [...apiWords(KLINE_FIELDS), ...apiWords(KLINE_LIBS),
+                   ...apiWords(MINIBT_API)];
+    } else if (owner === 'api' || owner === 'self.api') {
+        options = [...apiWords(ORDER_API), ...apiWords(MINIBT_API)];
+    } else if (owner === 'plotinfo' || owner === 'PlotInfo') {
+        options = apiWords(PLOT_KEYS);
     } else {
         options = words(PY_KEYWORDS);
     }
@@ -324,6 +390,58 @@ function lspExtensions(spec: MountSpec,
     }
 }
 
+// ------------------------------------------------------------ 断点（v1.3.7）
+/** 设置断点行（0 基）→ 左侧红点（`gutter` 标记 ✓） */
+const setBreakpointsEffect = StateEffect.define<number[]>();
+
+class BreakpointMarker extends GutterMarker {
+    toDOM(): Node {
+        const dot = document.createElement('span');
+        dot.className = 'cm-bp-dot';
+        dot.textContent = '●';
+        return dot;
+    }
+}
+
+const breakpointMarker = new BreakpointMarker();
+
+/** 行号集合 → `RangeSet`（升序、去重、越界丢弃 ✓） */
+function breakpointSet(state: EditorState, lines: number[]):
+    RangeSet<GutterMarker> {
+    const builder = new RangeSetBuilder<GutterMarker>();
+    const unique = [...new Set((lines || [])
+        .map((line) => Number(line))
+        .filter((line) => Number.isFinite(line) && line >= 0
+            && line < state.doc.lines))].sort((a, b) => a - b);
+    for (const line of unique) {
+        const at = state.doc.line(line + 1).from;
+        builder.add(at, at, breakpointMarker);
+    }
+    return builder.finish();
+}
+
+const breakpointField = StateField.define<RangeSet<GutterMarker>>({
+    create: (state) => breakpointSet(state, []),
+    update(value, tr) {
+        for (const effect of tr.effects) {
+            if (effect.is(setBreakpointsEffect)) {
+                return breakpointSet(tr.state, effect.value);
+            }
+        }
+        if (!tr.docChanged) return value;
+        // 文档编辑 → 断点按**位置映射**换到新行（不会因为加了一行就错位 ✓）
+        const lines: number[] = [];
+        const iter = value.iter();
+        while (iter.value) {
+            const pos = tr.changes.mapPos(iter.from);
+            lines.push(tr.state.doc.lineAt(
+                Math.min(pos, tr.state.doc.length)).number - 1);
+            iter.next();
+        }
+        return breakpointSet(tr.state, lines);
+    },
+});
+
 export function mount(spec: MountSpec): EditorHandle {
     const dark = (spec.theme || 'dark') !== 'light';
     // 语言服务客户端（只有 Python 才有）；大纲 / 折叠 / 格式化都靠它 ✓
@@ -416,6 +534,21 @@ export function mount(spec: MountSpec): EditorHandle {
                 languageOf(spec.path),
                 // 语法诊断的左侧标记（浪线由 LSP 的 setDiagnostics 画 ✓）
                 lintGutter(),
+                // ★ 断点栏（v1.3.7）：点一下打 / 取消断点 → 回调面板 ✓
+                breakpointField,
+                gutter({
+                    class: 'cm-bp-gutter',
+                    markers: (v) => v.state.field(breakpointField),
+                    initialSpacer: () => breakpointMarker,
+                    domEventHandlers: {
+                        mousedown: (v, line) => {
+                            const number = v.state.doc.lineAt(line.from)
+                                .number - 1;
+                            spec.onGutterClick?.(number);
+                            return true;
+                        },
+                    },
+                }),
                 foldService.of(foldProvider),
                 // Ctrl / Cmd + 点击：跳转定义（跨文件由面板打开 ✓）
                 EditorView.domEventHandlers({
@@ -572,6 +705,14 @@ export function mount(spec: MountSpec): EditorHandle {
                         borderLeft: '3px solid #ef5350',
                         paddingLeft: '4px',
                     },
+                    // ★ 断点栏（v1.3.7）：窄条 + 红点，跟 VS Code 一个观感 ✓
+                    '.cm-bp-gutter': {
+                        width: '12px', cursor: 'pointer',
+                        backgroundColor: dark ? '#14181e' : '#f6f7f9',
+                    },
+                    '.cm-bp-gutter .cm-bp-dot': {
+                        color: '#e5534b', fontSize: '10px', lineHeight: '1',
+                    },
                 }, { dark }),
                 EditorView.lineWrapping,
                 EditorView.updateListener.of((update) => {
@@ -725,6 +866,109 @@ export function mount(spec: MountSpec): EditorHandle {
             view.scrollDOM.scrollTop = scrollTop;
         },
         focus: () => view.focus(),
+        // ---- v1.3.7 ----
+        setBreakpoints: (lines: number[]) => {
+            view.dispatch({ effects: setBreakpointsEffect.of(lines || []) });
+        },
+        setFontSize: (px: number) => {
+            const size = Math.max(9, Math.min(28, Number(px) || 12.5));
+            view.dom.style.fontSize = `${size}px`;
+        },
+        getSelectionRange: () => {
+            const range = view.state.selection.main;
+            return {
+                from: range.from, to: range.to,
+                text: view.state.sliceDoc(range.from, range.to),
+            };
+        },
+        replaceSelection: (text: string) => {
+            const range = view.state.selection.main;
+            view.dispatch({
+                changes: { from: range.from, to: range.to, insert: text },
+                selection: { anchor: range.from + text.length },
+            });
+            view.focus();
+        },
+        renameSymbol: async (newName: string) => {
+            if (!client) {
+                return { ok: false, changed: 0, others: [],
+                         error: '该文件不支持重命名（不是 Python）' };
+            }
+            if (!String(newName || '').trim()) {
+                return { ok: false, changed: 0, others: [], error: '名字为空' };
+            }
+            const head = view.state.selection.main.head;
+            const line = view.state.doc.lineAt(head);
+            try {
+                const result = await lspRequest(client, 'textDocument/rename', {
+                    textDocument: { uri: documentUri },
+                    position: { line: line.number - 1, character: head - line.from },
+                    newName: String(newName),
+                }) as Record<string, unknown> | null;
+                const changes = ((result || {}).changes || {}) as Record<
+                    string, Array<Record<string, unknown>>>;
+                const edits = changes[documentUri] || [];
+                if (!edits.length) {
+                    const keys = Object.keys(changes);
+                    return { ok: false, changed: 0, others: keys,
+                             error: keys.length
+                                 ? '重命名只影响其它文件，暂不支持' : '没有可重命名的符号' };
+                }
+                const spans = edits.map((item) => {
+                    const range = (item.range || {}) as Record<
+                        string, Record<string, number>>;
+                    const start = range.start || {};
+                    const end = range.end || {};
+                    const from = view.state.doc.line(
+                        (start.line || 0) + 1).from + (start.character || 0);
+                    const to = view.state.doc.line(
+                        (end.line || 0) + 1).from + (end.character || 0);
+                    return { from, to, insert: String(item.newText || newName) };
+                }).sort((a, b) => a.from - b.from);
+                let delta = 0;
+                view.dispatch({
+                    changes: spans.map((span) => ({
+                        from: span.from + delta, to: span.to + delta,
+                        insert: span.insert,
+                    })),
+                });
+                view.focus();
+                return { ok: true, changed: spans.length, others: [] };
+            } catch (error) {
+                return { ok: false, changed: 0, others: [],
+                         error: String((error as Error).message || error) };
+            }
+        },
+        findReferences: async () => {
+            if (!client) return [];
+            const head = view.state.selection.main.head;
+            const line = view.state.doc.lineAt(head);
+            try {
+                const items = await lspRequest(
+                    client, 'textDocument/references', {
+                        textDocument: { uri: documentUri },
+                        position: { line: line.number - 1,
+                                    character: head - line.from },
+                        context: { includeDeclaration: true },
+                    }) as Array<Record<string, unknown>>;
+                const word = view.state.sliceDoc(
+                    view.state.wordAt(head)?.from ?? head,
+                    view.state.wordAt(head)?.to ?? head) || '';
+                return (items || []).map((item) => {
+                    const uri = String(item.uri || '');
+                    const start = ((item.range || {}) as Record<
+                        string, Record<string, number>>).start || {};
+                    return {
+                        path: uri.replace(/^file:\/\//, '')
+                            .replace(/^\/([A-Za-z]:)/, '$1'),
+                        line: Number(start.line) || 0,
+                        name: word,
+                    };
+                });
+            } catch {
+                return [];
+            }
+        },
         destroy: () => {
             try {
                 view.destroy();

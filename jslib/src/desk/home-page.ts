@@ -117,6 +117,8 @@ export interface HomePageOptions {
     onOpenWorkspace?: () => void;
     onOpenReplayLab?: () => void;
     onOpenAlerts?: () => void;
+    /** PI 独立界面（对话 + 编辑代码）✓ */
+    onOpenPi?: () => void;
     /** 「指标和策略」（仿 TradingView 指标库 ✓） */
     onOpenTv?: () => void;
 }
@@ -554,6 +556,10 @@ export class HomePage {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M18 15V10a6 6 0 1 0-12 0v5l-1.6 2.4h15.2L18 15z"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
                 预警中心
             </button>
+            <button class="desk-home-nav-item" data-nav="pi">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9.4 9.4 0 0 1-3.4-.6L3 21l1.7-5.1A8.3 8.3 0 0 1 3.6 11.5 8.4 8.4 0 0 1 12 3.1a8.4 8.4 0 0 1 9 8.4z"/></svg>
+                PI 助手
+            </button>
         </nav>
         <div class="desk-home-side-gap"></div>
         <div class="desk-home-side-label">自选分组 <button class="desk-home-side-add" data-group-add title="新建分组">＋</button></div>
@@ -721,6 +727,10 @@ export class HomePage {
                     if (this.options.onOpenAlerts) {
                         this.options.onOpenAlerts();
                     } else this.options.onToast('info', '价格预警在图表工具栏里设置');
+                } else if (name === 'pi') {
+                    // ★ PI 独立界面：对话 + 编辑代码（不用先开图表 ✓）
+                    if (this.options.onOpenPi) this.options.onOpenPi();
+                    else this.options.onToast('info', 'PI 助手暂不可用');
                 }
                 return;
             }
@@ -1205,6 +1215,13 @@ export class HomePage {
     /** 数据还没到（占位表 / 订阅刚建）→ 自动重试剩余次数 + 定时器 ✓ */
     private previewRetryLeft = 0;
     private previewRetryTimer: number | null = null;
+
+    /** 后端抓完财经日历 → 只换「事件日历」两行（不重绘整页 ✓） */
+    setEvents(events: Array<{ time?: string; text?: string;
+                              tone?: string; tail?: string }>): void {
+        this.events = events as never;
+        this.renderSignals();
+    }
 
     /** 后端推来的「主力 · 某交易所」合约（`{type:'home_main'}` ✓） */
     setMainRows(payload: Record<string, unknown>): void {
