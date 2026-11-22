@@ -1,0 +1,954 @@
+# ---------------------------------------------------------------- Alpha
+# py-alpha-lib（Rust，**可选依赖**）：`import alpha` 失败时给可读错误 ✓
+# ⚠ 必须是**模块级函数**：`CoreFunc` 的方法经 pandas accessor 是**未绑定**调用
+#   （`self._alpha_apply()` 会把第一个参数当成 self ✗），所以这里显式传 core。
+def _alpha_apply(core, name: str, local: dict, **kwargs):
+    """调用 `alpha.<NAME>`（数据源 = `FILED.C`，和 `pta_*` 完全一致）✓
+
+    * 第一个数组参数（alpha 的 `input` / `price` / `a` / `y` …）**固定取
+      `close`**：`_get_column_(locals(), *FILED.C)`（KLine → `close`，
+      IndSeries → 它自己），所以方法签名里没有 `input='close'` 这种参数 ✓
+    * 其余数组参数（`benchmark` / `dividend` / `b` …）由调用方传
+      `pd.Series` / `np.ndarray`；标量参数按 alpha 签名决定是否广播；
+    * 返回 `pd.Series`（对齐源数据索引）✓
+    """
+    from .ta_ import _LazyModule
+    alpha = _LazyModule("alpha")
+    try:
+        func = getattr(alpha, name)
+    except Exception as error:                                   # noqa: BLE001
+        raise RuntimeError(
+            "Alpha 指标需要安装 py-alpha-lib："
+            "py -3.12 -m pip install py-alpha-lib") from error
+    arg, kwarg = _get_column_(core, dict(local or {}), *FILED.C)
+    merged = {**(kwarg or {}), **(kwargs or {})}
+    annotations = _alpha_signature(name)
+    source = get_data(core) if not hasattr(core, "index") else core
+    index = getattr(source, "index", None)
+    params: dict = {}
+    first = True
+    for param, annotation in annotations.items():
+        value = merged.get(param)
+        wants_array = not _alpha_is_scalar(annotation)
+        if first and wants_array:
+            # 第一个数组参数 ← FILED.C（close）✓
+            arrays = arg if isinstance(arg, (list, tuple)) else [arg]
+            params[param] = _alpha_array(arrays[0])
+            first = False
+            continue
+        if wants_array:
+            if value is None:
+                raise ValueError(
+                    f'alpha.{name} 需要参数 {param}（pd.Series / np.ndarray）')
+            params[param] = _alpha_array(value)
+            continue
+        # ---- 标量参数 ----
+        if isinstance(value, (pd.Series, np.ndarray, list, tuple)):
+            flat = np.asarray(value).ravel()
+            value = flat[0] if flat.size else value
+        if value is None:
+            continue
+        params[param] = value
+    values = np.asarray(func(**params))
+    if values.dtype == np.bool_:
+        values = values.astype(np.float64)
+    if index is not None and len(values) == len(index):
+        return pd.Series(values, index=index)
+    return pd.Series(values)
+
+
+def _alpha_array(value) -> np.ndarray:
+    """任意序列 → `np.ndarray(float64)` ✓"""
+    data = value.to_numpy() if hasattr(value, "to_numpy") else value
+    return np.asarray(data, dtype=np.float64)
+
+
+def _alpha_is_scalar(annotation: str) -> bool:
+    """注解是不是标量（`int` / `float` / `bool` / `str`）✓
+
+    `inspect` 拿到的既可能是字符串 `'int'`，也可能是 `<class 'int'>`。
+    """
+    text = str(annotation or '').strip().rstrip('>').strip()
+    return text in ('int', 'float', 'bool', 'str') or text.endswith(
+        ("'int'", "'float'", "'bool'", "'str'"))
+
+
+#: `alpha.<NAME>` 的参数注解缓存（`A` = 数组；`int` / `float` = 标量）✓
+_ALPHA_SIGNATURE_CACHE: dict = {}
+
+
+def _alpha_signature(name: str) -> dict:
+    """`alpha.<NAME>` 每个参数的注解串（`'A'` / `'int'` / `'float'`）✓"""
+    cached = _ALPHA_SIGNATURE_CACHE.get(name)
+    if cached is not None:
+        return cached
+    out: dict = {}
+    try:
+        import inspect as _inspect
+
+        from .ta_ import _LazyModule
+        func = getattr(_LazyModule('alpha'), name)
+        for param in _inspect.signature(func).parameters.values():
+            out[param.name] = str(param.annotation)
+    except Exception:                                            # noqa: BLE001
+        out = {}
+    _ALPHA_SIGNATURE_CACHE[name] = out
+    return out
+
+    def alpha_abs(self, **kwargs) -> pd.Series:
+        """绝对值（`alpha.ABS`，Rust 实现）
+
+        逐元素取绝对值（ABS(x) = |x|），构造幅度类条件时用。
+
+        计算方法：ABS(x) = |x|
+
+        args : close
+        """
+        return _alpha_apply(self, "ABS", locals(), **kwargs)
+
+    def alpha_all(self, periods: int = 20, **kwargs) -> pd.Series:
+        """窗口内恒成立（`alpha.ALL`，Rust 实现）
+
+        窗口内条件**始终为真**返回 1，否则 0（periods=0 = 从开始至今）。
+
+        计算方法：ALL(cond, periods)
+
+        args : close
+        """
+        return _alpha_apply(self, "ALL", locals(), **kwargs)
+
+    def alpha_alpha(self, benchmark=None, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动 Jensen Alpha（`alpha.ALPHA`，Rust 实现）
+
+        扣除 Beta 后的**超额收益**（跑赢基准多少），因子研究常用。
+
+        计算方法：α = mean(x) - β·mean(benchmark)
+
+        args : close + ALPHA.benchmark
+        """
+        return _alpha_apply(self, "ALPHA", locals(), **kwargs)
+
+    def alpha_any(self, periods: int = 20, **kwargs) -> pd.Series:
+        """窗口内至少一次成立（`alpha.ANY`，Rust 实现）
+
+        窗口内条件**出现过**返回 1，否则 0。
+
+        计算方法：ANY(cond, periods)
+
+        args : close
+        """
+        return _alpha_apply(self, "ANY", locals(), **kwargs)
+
+    def alpha_backfill(self, **kwargs) -> pd.Series:
+        """向前填充 NaN（`alpha.BACKFILL`，Rust 实现）
+
+        用最近一个有效值填补 NaN（开头的 NaN 保留），清洗数据用。
+
+        计算方法：x[i] = x[i-1] if isnan(x[i])
+
+        args : close
+        """
+        return _alpha_apply(self, "BACKFILL", locals(), **kwargs)
+
+    def alpha_backset(self, periods: int = 20, **kwargs) -> pd.Series:
+        """回溯置真（`alpha.BACKSET`，Rust 实现）
+
+        条件成立时，把**当前及之前 periods-1 根**都置为真（画"多久之前发生过"）。
+
+        计算方法：BACKSET(cond, periods)
+
+        args : close
+        """
+        return _alpha_apply(self, "BACKSET", locals(), **kwargs)
+
+    def alpha_barslast(self, **kwargs) -> pd.Series:
+        """距上次成立的根数（`alpha.BARSLAST`，Rust 实现）
+
+        距**最近一次**条件为真的根数（0 = 当前这根），判断信号新鲜度。
+
+        计算方法：bars since last(cond)
+
+        args : close
+        """
+        return _alpha_apply(self, "BARSLAST", locals(), **kwargs)
+
+    def alpha_barssince(self, **kwargs) -> pd.Series:
+        """距首次成立的根数（`alpha.BARSSINCE`，Rust 实现）
+
+        距**第一次**条件为真的根数，用于统计"已经涨了几天"。
+
+        计算方法：bars since first(cond)
+
+        args : close
+        """
+        return _alpha_apply(self, "BARSSINCE", locals(), **kwargs)
+
+    def alpha_beta(self, benchmark=None, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动 Beta（`alpha.BETA`，Rust 实现）
+
+        标的相对基准的**系统性风险**（1 = 同步，>1 更波动）。
+
+        计算方法：β = Cov(x, benchmark) / Var(benchmark)
+
+        args : close + BETA.benchmark
+        """
+        return _alpha_apply(self, "BETA", locals(), **kwargs)
+
+    def alpha_bins(self, bins: int = 10, **kwargs) -> pd.Series:
+        """等宽分箱编号（`alpha.BINS`，Rust 实现）
+
+        把数值离散成 0..bins-1 的桶号（同值同桶），常用来做分组 / 直方图；放副图。
+
+        计算方法：bin = floor((x - min) / (max - min) * bins)
+
+        args : close
+        """
+        return _alpha_apply(self, "BINS", locals(), **kwargs)
+
+    def alpha_bw_split(self, dividend=None, transfer_shares=None, right_shares=None, right_price=None, **kwargs) -> pd.Series:
+        """后向拆股 / 分红复权（`alpha.BW_SPLIT`，Rust 实现）
+
+        从最新往最早按等差数列调整价格（除权除息后保持历史连续）。
+
+        计算方法：price_adj = price / factor
+
+        args : close + BW_SPLIT.dividend, BW_SPLIT.transfer_shares, BW_SPLIT.right_shares, BW_SPLIT.right_price
+        """
+        return _alpha_apply(self, "BW_SPLIT", locals(), **kwargs)
+
+    def alpha_bw_split_factor(self, dividend=None, transfer_shares=None, right_shares=None, right_price=None, **kwargs) -> pd.Series:
+        """后向复权因子（`alpha.BW_SPLIT_FACTOR`，Rust 实现）
+
+        只算后向复权因子（等比数列），价格自己乘即可。
+
+        计算方法：factor 逐步相乘
+
+        args : close + BW_SPLIT_FACTOR.dividend, BW_SPLIT_FACTOR.transfer_shares, BW_SPLIT_FACTOR.right_shares, BW_SPLIT_FACTOR.right_price
+        """
+        return _alpha_apply(self, "BW_SPLIT_FACTOR", locals(), **kwargs)
+
+    def alpha_cc_rank(self, **kwargs) -> pd.Series:
+        """横截面排名百分比（`alpha.CC_RANK`，Rust 实现）
+
+        同一时刻跨标的排名百分比（0~1，同值取平均）。
+
+        计算方法：rank(x) / groups
+
+        args : close
+        """
+        return _alpha_apply(self, "CC_RANK", locals(), **kwargs)
+
+    def alpha_cc_zscore(self, **kwargs) -> pd.Series:
+        """横截面 Z 分数（`alpha.CC_ZSCORE`，Rust 实现）
+
+        同一时刻跨标的标准化（NaN 不参与均值/方差）。
+
+        计算方法：z = (x - mean) / std（跨标的）
+
+        args : close
+        """
+        return _alpha_apply(self, "CC_ZSCORE", locals(), **kwargs)
+
+    def alpha_corr(self, periods: int = 20, **kwargs) -> pd.Series:
+        """时序相关性（`alpha.CORR`，Rust 实现）
+
+        窗口内价格与**时间序号**的相关系数，衡量趋势线性程度（±1 很直，0 很乱）；放副图。
+
+        计算方法：corr(x, index) in window
+
+        args : close
+        """
+        return _alpha_apply(self, "CORR", locals(), **kwargs)
+
+    def alpha_corr2(self, y=None, periods: int = 20, **kwargs) -> pd.Series:
+        """两序列滚动相关（`alpha.CORR2`，Rust 实现）
+
+        两条序列在窗口内的相关系数（±1），配对 / 对冲时判断联动强弱。
+
+        计算方法：corr = Cov(x,y) / (σx·σy)
+
+        args : close + CORR2.y
+        """
+        return _alpha_apply(self, "CORR2", locals(), **kwargs)
+
+    def alpha_count(self, periods: int = 20, **kwargs) -> pd.Series:
+        """窗口内条件计数（`alpha.COUNT`，Rust 实现）
+
+        窗口内**条件成立**的根数，统计连续上涨 / 放量天数等；放副图。
+
+        计算方法：count(cond, n)
+
+        args : close
+        """
+        return _alpha_apply(self, "COUNT", locals(), **kwargs)
+
+    def alpha_count_nans(self, periods: int = 20, **kwargs) -> pd.Series:
+        """窗口内 NaN 计数（`alpha.COUNT_NANS`，Rust 实现）
+
+        前 periods 根里 NaN 的个数，数据质量体检用。
+
+        计算方法：count(isnan, n)
+
+        args : close
+        """
+        return _alpha_apply(self, "COUNT_NANS", locals(), **kwargs)
+
+    def alpha_count_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """窗口内条件计数（可变窗口）（`alpha.COUNT_V`，Rust 实现）
+
+        和 `COUNT` 相同，窗口可逐根变化。
+
+        计算方法：count(cond, n_i)
+
+        args : close
+        """
+        return _alpha_apply(self, "COUNT_V", locals(), **kwargs)
+
+    def alpha_cov(self, y=None, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动协方差（`alpha.COV`，Rust 实现）
+
+        两条序列的协方差（方向一致的联动程度）。
+
+        计算方法：cov = (Σxy - ΣxΣy/n) / (n-1)
+
+        args : close + COV.y
+        """
+        return _alpha_apply(self, "COV", locals(), **kwargs)
+
+    def alpha_cross(self, b=None, **kwargs) -> pd.Series:
+        """上穿（金叉）（`alpha.CROSS`，Rust 实现）
+
+        `a` 上穿 `b`（上一根 a<b、当前 a>=b）为真；`a` 固定取 close，`b` 由参数传入。
+
+        计算方法：CROSS(a,b) = a[i-1] < b[i-1] and a[i] >= b[i]
+
+        args : close + CROSS.b
+        """
+        return _alpha_apply(self, "CROSS", locals(), **kwargs)
+
+    def alpha_dma(self, weight: float = 0.5, **kwargs) -> pd.Series:
+        """指数平滑（固定权重）（`alpha.DMA`，Rust 实现）
+
+        直接用权重做指数平滑，等价于自定义 α 的 EMA。
+
+        计算方法：dma_i = w·x_i + (1-w)·dma_{i-1}
+
+        args : close
+        """
+        return _alpha_apply(self, "DMA", locals(), **kwargs)
+
+    def alpha_dma_v(self, weight: float = 0.5, **kwargs) -> pd.Series:
+        """指数平滑（可变权重）（`alpha.DMA_V`，Rust 实现）
+
+        权重可逐根变化，常用于自适应均线。
+
+        计算方法：dma_i = w_i·x_i + (1-w_i)·dma_{i-1}
+
+        args : close
+        """
+        return _alpha_apply(self, "DMA_V", locals(), **kwargs)
+
+    def alpha_ema(self, period: int = 20, **kwargs) -> pd.Series:
+        """指数移动平均（`alpha.EMA`，Rust 实现）
+
+        按指数衰减加权，越新的价格权重越大，比 MA 更灵敏。
+
+        计算方法：ema_i = α·x_i + (1-α)·ema_{i-1}，α = 2/(period+1)
+
+        args : close
+        """
+        return _alpha_apply(self, "EMA", locals(), **kwargs)
+
+    def alpha_ema_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """指数移动平均（可变窗口）（`alpha.EMA_V`，Rust 实现）
+
+        和 `EMA` 相同，平滑系数可**逐根变化**。
+
+        计算方法：α_i = 2/(period_i+1)
+
+        args : close
+        """
+        return _alpha_apply(self, "EMA_V", locals(), **kwargs)
+
+    def alpha_entropy(self, periods: int = 20, bins: int = 10, **kwargs) -> pd.Series:
+        """滚动香农熵（`alpha.ENTROPY`，Rust 实现）
+
+        窗口内分箱后的信息熵，衡量"混乱度"（熵低 = 单边，熵高 = 震荡）；放副图。
+
+        计算方法：-sum(p·ln p)，p 为等宽分箱频率
+
+        args : close
+        """
+        return _alpha_apply(self, "ENTROPY", locals(), **kwargs)
+
+    def alpha_filter(self, periods: int = 20, **kwargs) -> pd.Series:
+        """信号去抖（`alpha.FILTER`，Rust 实现）
+
+        条件成立一次后，**之后 periods 根内不再算成立**（过滤连续信号）。
+
+        计算方法：FILTER(cond, periods)
+
+        args : close
+        """
+        return _alpha_apply(self, "FILTER", locals(), **kwargs)
+
+    def alpha_fret(self, close=None, is_calc=None, delay: int = 1, periods: int = 20, **kwargs) -> pd.Series:
+        """未来收益（回测标签）（`alpha.FRET`，Rust 实现）
+
+        从延迟 delay 根后的开盘价，到之后再 periods-1 根的收盘价的收益率——**用于生成训练标签**（未来函数）。
+
+        计算方法：(Close[t+delay+periods-1] - Open[t+delay]) / Open[t+delay]
+
+        args : close + FRET.close, FRET.is_calc
+        """
+        return _alpha_apply(self, "FRET", locals(), **kwargs)
+
+    def alpha_fw_split(self, dividend=None, transfer_shares=None, right_shares=None, right_price=None, **kwargs) -> pd.Series:
+        """前向拆股 / 分红复权（`alpha.FW_SPLIT`，Rust 实现）
+
+        从最早往最新按等差数列调整价格（前复权口径）。
+
+        计算方法：price_adj = price * factor
+
+        args : close + FW_SPLIT.dividend, FW_SPLIT.transfer_shares, FW_SPLIT.right_shares, FW_SPLIT.right_price
+        """
+        return _alpha_apply(self, "FW_SPLIT", locals(), **kwargs)
+
+    def alpha_fw_split_factor(self, dividend=None, transfer_shares=None, right_shares=None, right_price=None, **kwargs) -> pd.Series:
+        """前向复权因子（`alpha.FW_SPLIT_FACTOR`，Rust 实现）
+
+        只算前向复权因子（等比数列）。
+
+        计算方法：factor 逐步相乘
+
+        args : close + FW_SPLIT_FACTOR.dividend, FW_SPLIT_FACTOR.transfer_shares, FW_SPLIT_FACTOR.right_shares, FW_SPLIT_FACTOR.right_price
+        """
+        return _alpha_apply(self, "FW_SPLIT_FACTOR", locals(), **kwargs)
+
+    def alpha_group_rank(self, input=None, **kwargs) -> pd.Series:
+        """分组内排名（`alpha.GROUP_RANK`，Rust 实现）
+
+        同一时刻按 `category` 分组后组内排名（0~1），横截面选股用。
+
+        计算方法：rank(x) within category
+
+        args : close + GROUP_RANK.input
+        """
+        return _alpha_apply(self, "GROUP_RANK", locals(), **kwargs)
+
+    def alpha_group_zscore(self, input=None, **kwargs) -> pd.Series:
+        """分组内 Z 分数（`alpha.GROUP_ZSCORE`，Rust 实现）
+
+        同一时刻按 `category` 分组后组内标准化，横截面比较用。
+
+        计算方法：z = (x - group_mean) / group_std
+
+        args : close + GROUP_ZSCORE.input
+        """
+        return _alpha_apply(self, "GROUP_ZSCORE", locals(), **kwargs)
+
+    def alpha_hhv(self, periods: int = 20, **kwargs) -> pd.Series:
+        """区间最高值（`alpha.HHV`，Rust 实现）
+
+        前 n 根（含当前）的最高价——画通道上沿、突破位。
+
+        计算方法：HHV(x, n) = max(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "HHV", locals(), **kwargs)
+
+    def alpha_hhvbars(self, periods: int = 20, **kwargs) -> pd.Series:
+        """距区间最高点的根数（`alpha.HHVBARS`，Rust 实现）
+
+        最高点出现在几根之前（0 = 就是当前这根），用于判断高点新旧。
+
+        计算方法：i - argmax(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "HHVBARS", locals(), **kwargs)
+
+    def alpha_hhvbars_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """距区间最高点的根数（可变窗口）（`alpha.HHVBARS_V`，Rust 实现）
+
+        和 `HHVBARS` 相同，回看根数可逐根变化。
+
+        计算方法：同上，n 用 n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "HHVBARS_V", locals(), **kwargs)
+
+    def alpha_hhv_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """区间最高值（可变窗口）（`alpha.HHV_V`，Rust 实现）
+
+        和 `HHV` 相同，回看根数可逐根变化。
+
+        计算方法：同上，n 用 n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "HHV_V", locals(), **kwargs)
+
+    def alpha_intercept(self, periods: int = 20, **kwargs) -> pd.Series:
+        """线性回归截距（`alpha.INTERCEPT`，Rust 实现）
+
+        窗口内价格回归直线的截距（≈ 窗口起点价格水平），可当趋势基准线；主图。
+
+        计算方法：intercept of linreg(x, n)
+
+        args : close
+        """
+        return _alpha_apply(self, "INTERCEPT", locals(), **kwargs)
+
+    def alpha_kurtosis(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动超额峰度（`alpha.KURTOSIS`，Rust 实现）
+
+        尾部厚度（>0 尖峰厚尾、<0 平顶），极端行情预警用；放副图。
+
+        计算方法：调整 Fisher 公式（与 pandas 一致，超额峰度）
+
+        args : close
+        """
+        return _alpha_apply(self, "KURTOSIS", locals(), **kwargs)
+
+    def alpha_last(self, **kwargs) -> pd.Series:
+        """连续成立根数（`alpha.LAST`，Rust 实现）
+
+        截至当前条件**连续成立**了多少根（断掉归零）。
+
+        计算方法：LAST(cond)
+
+        args : close
+        """
+        return _alpha_apply(self, "LAST", locals(), **kwargs)
+
+    def alpha_llv(self, periods: int = 20, **kwargs) -> pd.Series:
+        """区间最低值（`alpha.LLV`，Rust 实现）
+
+        前 n 根（含当前）的最低价——画通道下沿、支撑位。
+
+        计算方法：LLV(x, n) = min(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "LLV", locals(), **kwargs)
+
+    def alpha_llvbars(self, periods: int = 20, **kwargs) -> pd.Series:
+        """距区间最低点的根数（`alpha.LLVBARS`，Rust 实现）
+
+        最低点出现在几根之前（0 = 当前这根）。
+
+        计算方法：i - argmin(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "LLVBARS", locals(), **kwargs)
+
+    def alpha_llvbars_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """距区间最低点的根数（可变窗口）（`alpha.LLVBARS_V`，Rust 实现）
+
+        和 `LLVBARS` 相同，回看根数可逐根变化。
+
+        计算方法：同上，n 用 n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "LLVBARS_V", locals(), **kwargs)
+
+    def alpha_llv_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """区间最低值（可变窗口）（`alpha.LLV_V`，Rust 实现）
+
+        和 `LLV` 相同，回看根数可逐根变化。
+
+        计算方法：同上，n 用 n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "LLV_V", locals(), **kwargs)
+
+    def alpha_longcross(self, b=None, n: int = 5, **kwargs) -> pd.Series:
+        """长期上穿（`alpha.LONGCROSS`，Rust 实现）
+
+        连续 n 根 `a<b` 之后**首次**上穿 `b`（要求"站上去之前压了 n 根"）。
+
+        计算方法：all(a<b, n) then a>=b
+
+        args : close + LONGCROSS.b
+        """
+        return _alpha_apply(self, "LONGCROSS", locals(), **kwargs)
+
+    def alpha_lwma(self, periods: int = 20, **kwargs) -> pd.Series:
+        """线性加权移动平均（`alpha.LWMA`，Rust 实现）
+
+        窗口内按 1..n 线性加权，越新权重越大（比 MA 跟手、比 EMA 稳）。
+
+        计算方法：LWMA = sum(x_i · w_i) / sum(w_i)，w_i = 1..n
+
+        args : close
+        """
+        return _alpha_apply(self, "LWMA", locals(), **kwargs)
+
+    def alpha_lwma_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """线性加权移动平均（可变窗口）（`alpha.LWMA_V`，Rust 实现）
+
+        和 `LWMA` 相同，窗口可逐根变化。
+
+        计算方法：同上，n 用 n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "LWMA_V", locals(), **kwargs)
+
+    def alpha_ma(self, periods: int = 20, **kwargs) -> pd.Series:
+        """简单移动平均（`alpha.MA`，Rust 实现）
+
+        最基础的均线：窗口内收盘价的算术平均，用来平滑噪声、看趋势方向。
+
+        计算方法：MA(x, n) = sum(x, n) / n
+
+        args : close
+        """
+        return _alpha_apply(self, "MA", locals(), **kwargs)
+
+    def alpha_max(self, b=None, **kwargs) -> pd.Series:
+        """逐元素取大（`alpha.MAX`，Rust 实现）
+
+        两个序列逐根取较大值（可当"价格站上某线"的台阶线）。
+
+        计算方法：MAX(a, b)
+
+        args : close + MAX.b
+        """
+        return _alpha_apply(self, "MAX", locals(), **kwargs)
+
+    def alpha_max_drawdown(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动最大回撤（`alpha.MAX_DRAWDOWN`，Rust 实现）
+
+        窗口内的最大峰谷跌幅（负数，-0.2 = 回撤 20%），评估持有风险；放副图。
+
+        计算方法：min((x - 峰值) / 峰值)
+
+        args : close
+        """
+        return _alpha_apply(self, "MAX_DRAWDOWN", locals(), **kwargs)
+
+    def alpha_ma_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """简单移动平均（可变窗口）（`alpha.MA_V`，Rust 实现）
+
+        和 `MA` 相同，只是窗口长度可以**逐根变化**（例如用 ATR 或成交量自适应）。
+
+        计算方法：MA_V(x, n_i) = sum(x, n_i) / n_i
+
+        args : close
+        """
+        return _alpha_apply(self, "MA_V", locals(), **kwargs)
+
+    def alpha_min(self, b=None, **kwargs) -> pd.Series:
+        """逐元素取小（`alpha.MIN`，Rust 实现）
+
+        两个序列逐根取较小值。
+
+        计算方法：MIN(a, b)
+
+        args : close + MIN.b
+        """
+        return _alpha_apply(self, "MIN", locals(), **kwargs)
+
+    def alpha_min_max_diff(self, periods: int = 20, **kwargs) -> pd.Series:
+        """区间振幅（`alpha.MIN_MAX_DIFF`，Rust 实现）
+
+        窗口内最高与最低之差（ATR 的极值版），衡量波动幅度；放副图。
+
+        计算方法：max(x, d) - min(x, d)
+
+        args : close
+        """
+        return _alpha_apply(self, "MIN_MAX_DIFF", locals(), **kwargs)
+
+    def alpha_moment(self, periods: int = 20, k: int = 1, **kwargs) -> pd.Series:
+        """滚动 k 阶中心矩（`alpha.MOMENT`，Rust 实现）
+
+        分布形状的原始矩（k=2 方差、k=3 偏度、k=4 峰度）；放副图。
+
+        计算方法：moment = mean((x - mean)^k)
+
+        args : close
+        """
+        return _alpha_apply(self, "MOMENT", locals(), **kwargs)
+
+    def alpha_neutralize(self, input=None, **kwargs) -> pd.Series:
+        """中性化（`alpha.NEUTRALIZE`，Rust 实现）
+
+        剔除 `category`（行业等）对数值的影响，得到行业内可比的残差。
+
+        计算方法：x - group_mean(x)（按 category 分组）
+
+        args : close + NEUTRALIZE.input
+        """
+        return _alpha_apply(self, "NEUTRALIZE", locals(), **kwargs)
+
+    def alpha_product(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动乘积（`alpha.PRODUCT`，Rust 实现）
+
+        窗口内连乘（periods=0 时从头累计），复利 / 比值累乘场景用；放副图。
+
+        计算方法：prod(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "PRODUCT", locals(), **kwargs)
+
+    def alpha_quantile(self, periods: int = 20, q: float = 0.5, **kwargs) -> pd.Series:
+        """滚动分位数（`alpha.QUANTILE`，Rust 实现）
+
+        窗口内的 q 分位值（线性插值），可做动态支撑 / 压力；放副图。
+
+        计算方法：quantile(x[i-n+1 .. i], q)
+
+        args : close
+        """
+        return _alpha_apply(self, "QUANTILE", locals(), **kwargs)
+
+    def alpha_rank(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动分位排名（`alpha.RANK`，Rust 实现）
+
+        当前值在窗口内的排名（min 法处理并列），取值 0..n，做横截面 / 时序强弱比较好用；放副图。
+
+        计算方法：rank(x_i) in x[i-n+1 .. i]
+
+        args : close
+        """
+        return _alpha_apply(self, "RANK", locals(), **kwargs)
+
+    def alpha_rcross(self, b=None, **kwargs) -> pd.Series:
+        """下穿（死叉）（`alpha.RCROSS`，Rust 实现）
+
+        `a` 下穿 `b`（上一根 a>b、当前 a<=b）为真；`a` 固定取 close。
+
+        计算方法：RCROSS(a,b) = a[i-1] > b[i-1] and a[i] <= b[i]
+
+        args : close + RCROSS.b
+        """
+        return _alpha_apply(self, "RCROSS", locals(), **kwargs)
+
+    def alpha_ref(self, periods: int = 20, **kwargs) -> pd.Series:
+        """向前引用（位移）（`alpha.REF`，Rust 实现）
+
+        取 n 根之前的值（0 = 当前），常用于算涨跌、比较前高前低。
+
+        计算方法：REF(x, n)_i = x[i-n]
+
+        args : close
+        """
+        return _alpha_apply(self, "REF", locals(), **kwargs)
+
+    def alpha_ref_v(self, periods: int = 20, **kwargs) -> pd.Series:
+        """向前引用（可变位移）（`alpha.REF_V`，Rust 实现）
+
+        和 `REF` 相同，回退根数可逐根变化。
+
+        计算方法：REF_V(x, n)_i = x[i-n_i]
+
+        args : close
+        """
+        return _alpha_apply(self, "REF_V", locals(), **kwargs)
+
+    def alpha_regbeta(self, x=None, periods: int = 20, **kwargs) -> pd.Series:
+        """回归系数（Y 对 X）（`alpha.REGBETA`，Rust 实现）
+
+        Y 对 X 回归的斜率 Beta（X 变 1 单位，Y 平均变多少）。
+
+        计算方法：β = Cov(x, y) / Var(x)
+
+        args : close + REGBETA.x
+        """
+        return _alpha_apply(self, "REGBETA", locals(), **kwargs)
+
+    def alpha_regresi(self, x=None, periods: int = 20, **kwargs) -> pd.Series:
+        """回归残差（`alpha.REGRESI`，Rust 实现）
+
+        Y 对 X 回归后**最后一点的残差**，衡量偏离程度（均值回归信号）。
+
+        计算方法：ε = y - (a + b·x)
+
+        args : close + REGRESI.x
+        """
+        return _alpha_apply(self, "REGRESI", locals(), **kwargs)
+
+    def alpha_rlongcross(self, b=None, n: int = 5, **kwargs) -> pd.Series:
+        """长期下穿（`alpha.RLONGCROSS`，Rust 实现）
+
+        连续 n 根 `a>b` 之后**首次**下穿 `b`。
+
+        计算方法：all(a>b, n) then a<=b
+
+        args : close + RLONGCROSS.b
+        """
+        return _alpha_apply(self, "RLONGCROSS", locals(), **kwargs)
+
+    def alpha_scan_add(self, condition=None, **kwargs) -> pd.Series:
+        """条件累加（自引用）（`alpha.SCAN_ADD`，Rust 实现）
+
+        `r[i] = r[i-1] + (cond ? x : 0)`；用于 GTJA 这类需要**自引用**的 alpha 表达式。
+
+        计算方法：r[i] = r[i-1] + (cond[i] ? x[i] : 0)
+
+        args : close + SCAN_ADD.condition
+        """
+        return _alpha_apply(self, "SCAN_ADD", locals(), **kwargs)
+
+    def alpha_scan_mul(self, condition=None, **kwargs) -> pd.Series:
+        """条件累乘（自引用）（`alpha.SCAN_MUL`，Rust 实现）
+
+        `r[i] = r[i-1] * (cond ? x : 1)`；自引用乘法版的 alpha 表达式。
+
+        计算方法：r[i] = r[i-1] * (cond[i] ? x[i] : 1)
+
+        args : close + SCAN_MUL.condition
+        """
+        return _alpha_apply(self, "SCAN_MUL", locals(), **kwargs)
+
+    def alpha_sharpe(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动夏普比率（`alpha.SHARPE`，Rust 实现）
+
+        窗口内收益均值 / 收益标准差，衡量风险调整后的收益质量；放副图。
+
+        计算方法：sharpe = mean(ret) / stddev(ret)
+
+        args : close
+        """
+        return _alpha_apply(self, "SHARPE", locals(), **kwargs)
+
+    def alpha_skewness(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动偏度（`alpha.SKEWNESS`，Rust 实现）
+
+        分布左右偏斜程度（>0 右偏 / 尖峰在左），配合波动率看风险形态；放副图。
+
+        计算方法：Fisher-Pearson 调整式（与 pandas 一致）
+
+        args : close
+        """
+        return _alpha_apply(self, "SKEWNESS", locals(), **kwargs)
+
+    def alpha_slope(self, periods: int = 20, **kwargs) -> pd.Series:
+        """线性回归斜率（`alpha.SLOPE`，Rust 实现）
+
+        窗口内价格回归直线的斜率（每根变化量），判断趋势强弱 / 转向；放副图。
+
+        计算方法：slope of linreg(x, n)
+
+        args : close
+        """
+        return _alpha_apply(self, "SLOPE", locals(), **kwargs)
+
+    def alpha_sma(self, n: int = 5, m: int = 2, **kwargs) -> pd.Series:
+        """SMA（通达信式指数平均）（`alpha.SMA`，Rust 实现）
+
+        权重 = m/n 的指数平均，即通称的 `SMA(X, N, M)`；比 EMA 更平滑。
+
+        计算方法：y_i = (m·x_i + (n-m)·y_{i-1}) / n
+
+        args : close
+        """
+        return _alpha_apply(self, "SMA", locals(), **kwargs)
+
+    def alpha_sma_v(self, ns: int = 1, m: int = 2, **kwargs) -> pd.Series:
+        """SMA（可变周期）（`alpha.SMA_V`，Rust 实现）
+
+        和 `SMA` 相同，周期可逐根变化。
+
+        计算方法：y_i = (m·x_i + (ns_i-m)·y_{i-1}) / ns_i
+
+        args : close
+        """
+        return _alpha_apply(self, "SMA_V", locals(), **kwargs)
+
+    def alpha_stddev(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动标准差（`alpha.STDDEV`，Rust 实现）
+
+        衡量波动大小（σ），是布林带 / 波动率过滤的基础；放副图。
+
+        计算方法：std = sqrt(sum((x-mean)^2) / (n-1))
+
+        args : close
+        """
+        return _alpha_apply(self, "STDDEV", locals(), **kwargs)
+
+    def alpha_sum(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动求和（`alpha.SUM`，Rust 实现）
+
+        窗口内求和（periods=0 时是从头累计），成交量 / 资金流指标常用；放副图。
+
+        计算方法：sum(x[i-n+1 .. i])
+
+        args : close
+        """
+        return _alpha_apply(self, "SUM", locals(), **kwargs)
+
+    def alpha_sumbars(self, amount: float = 1.0, **kwargs) -> pd.Series:
+        """累计达到目标值的根数（`alpha.SUMBARS`，Rust 实现）
+
+        从当前往回累加，到累计值 ≥ `amount` 需要几根（AmiBroker 同款）。
+
+        计算方法：bars until sum >= amount
+
+        args : close
+        """
+        return _alpha_apply(self, "SUMBARS", locals(), **kwargs)
+
+    def alpha_sumif(self, condition=None, periods: int = 20, **kwargs) -> pd.Series:
+        """条件滚动求和（`alpha.SUMIF`，Rust 实现）
+
+        窗口内**只对条件成立**的根求和（例如只统计上涨日的成交量）。
+
+        计算方法：sum(x where cond, n)
+
+        args : close + SUMIF.condition
+        """
+        return _alpha_apply(self, "SUMIF", locals(), **kwargs)
+
+    def alpha_var(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动方差（`alpha.VAR`，Rust 实现）
+
+        标准差的平方（σ²），波动率的原始度量；放副图。
+
+        计算方法：var = sum((x-mean)^2) / (n-1)
+
+        args : close
+        """
+        return _alpha_apply(self, "VAR", locals(), **kwargs)
+
+    def alpha_weighted_delay(self, periods: int = 20, **kwargs) -> pd.Series:
+        """加权延迟（滞后 LWMA）（`alpha.WEIGHTED_DELAY`，Rust 实现）
+
+        对**滞后序列**做线性加权，等价于"把过去 k 根按 1..k 加权"的平滑滞后值。
+
+        计算方法：sum((k-i)·x[i]) / (k(k+1)/2)
+
+        args : close
+        """
+        return _alpha_apply(self, "WEIGHTED_DELAY", locals(), **kwargs)
+
+    def alpha_where(self, a=None, b=None, **kwargs) -> pd.Series:
+        """条件选择（`alpha.WHERE`，Rust 实现）
+
+        按条件在 a / b 之间逐根取值（三元表达式向量化）。
+
+        计算方法：WHERE(cond, a, b) = a if cond else b
+
+        args : close + WHERE.a, WHERE.b
+        """
+        return _alpha_apply(self, "WHERE", locals(), **kwargs)
+
+    def alpha_zscore(self, periods: int = 20, **kwargs) -> pd.Series:
+        """滚动 Z 分数（`alpha.ZSCORE`，Rust 实现）
+
+        当前值偏离均值多少个 σ（|z|>2 常视为极端），用于标准化信号；放副图。
+
+        计算方法：z = (x - mean) / std（样本 std，ddof=1）
+
+        args : close
+        """
+        return _alpha_apply(self, "ZSCORE", locals(), **kwargs)

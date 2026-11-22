@@ -1,0 +1,63 @@
+# ============================================================================
+# pylightcharts —— GitHub 仓库属性（.gitattributes）
+#
+# 目标：**同一个文件在任何机器上 checkout 出来字节都一样**，否则 CI 的两个
+# 「一致性」任务会永远红：
+#   * `js`   任务：`npm run build` 后 `git diff --exit-code -- pylightcharts/js`
+#   * `docs` 任务：`python scripts/gen_api_docs.py` 后比对 `docs/api.md`
+#
+# 规则顺序有意义：**后面的覆盖前面的**（git 取最后一条匹配）。
+# ============================================================================
+
+# 默认：按文本处理，仓库里统一 LF（Windows 工作区 checkout 也是 LF ✓）
+* text=auto eol=lf
+
+# ---------------------------------------------------------------- 前端产物
+# ★ 必须逐字节（`-text` = 不做任何行尾规范化）：
+#   CI 里 Linux 构建出来的 `desk.css` / `desk.html` 要和仓库里的完全一致。
+#   `desk.css` 是直接 copy 的源码，Windows 工作区若不固定成 LF 就会漂 ✗
+#   （v1.3.7-109 修的就是这个：postbuild 现在强制 LF + 内容哈希令牌）
+pylightcharts/js/* -text
+
+# ------------------------------------------------ Windows 脚本：保持 CRLF
+# cmd.exe / PowerShell 对 LF 的 .cmd 兼容性差（尤其 `goto` / 多行块），
+# 这几个文件统一 CRLF；它们不参与任何字节级比对 ✓
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# -------------------------------------------------------------- 笔记本
+# .ipynb 是 JSON 大文件：不做行尾规范化、也不生成 diff（避免无意义变更 ✗）
+*.ipynb -text -diff
+
+# -------------------------------------------------------------- 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.bmp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.whl binary
+*.pyd binary
+*.so binary
+*.dll binary
+*.exe binary
+
+# -------------------------------------------------------------- 数据文件
+# CSV **按文本**存（能 diff、能 review）。不要写 `*.csv binary`：
+# `examples/**/*.csv` 是示例数据，binary 之后 GitHub 上看不到改动 ✗
+
+# ---------------------------------------------------- 生成文档 / 锁文件
+# docs/api.md 由 `scripts/gen_api_docs.py` 生成（LF），CI 会重跑比对 ✓
+docs/api.md text eol=lf
+# package-lock.json 必须与 `npm ci` 的环境匹配，保持 LF + 可读 diff ✓
+jslib/package-lock.json text eol=lf
